@@ -85,7 +85,7 @@ export const parseScores = (text) => {
     tonality: g(['TONALITY.?ENERGY', 'TONALITY', 'TONE']),
     question: g(['QUESTION QUALITY', 'QUESTION']),
     silence: g(['SILENCE DISCIPLINE', 'SILENCE']),
-    gapCreation: g(['GAP CREATION', 'GAP']),
+    gettingTheWhy: g(['GETTING THE WHY', 'GETTING.?THE.?WHY']),
     overall,
   };
 };
@@ -111,7 +111,7 @@ export const parseDebriefScores = (text) => {
 
   return {
     ppfDiscovery: g(['PPF DISCOVERY', 'PPF', 'DISCOVERY']),
-    gapCreation: g(['GAP CREATION', 'GAP']),
+    gettingTheWhy: g(['GETTING THE WHY', 'GETTING.?THE.?WHY']),
     mustConversion: g(['MUST CONVERSION', 'MUST']),
     pullback: g(['PULLBACK EXECUTION', 'PULLBACK']),
     nextStep: g(['NEXT STEP LOCK', 'NEXT STEP']),

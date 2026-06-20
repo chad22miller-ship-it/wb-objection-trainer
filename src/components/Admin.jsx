@@ -92,7 +92,7 @@ export default function Admin({ onBack }) {
       tonality: avg(allRounds.map((r) => r.tonality).filter((x) => x != null)),
       question: avg(allRounds.map((r) => r.question).filter((x) => x != null)),
       silence: avg(allRounds.map((r) => r.silence).filter((x) => x != null)),
-      gapCreation: avg(allRounds.map((r) => r.gapCreation).filter((x) => x != null)),
+      gettingTheWhy: avg(allRounds.map((r) => r.gettingTheWhy).filter((x) => x != null)),
       trend,
       lastActive,
     };
@@ -209,7 +209,7 @@ export default function Admin({ onBack }) {
         {repList.map((rep) => {
           const isOpen = expandedRep === rep.id;
           const bars = [
-            { k: 'gapCreation', label: 'Gap Creation' },
+            { k: 'gettingTheWhy', label: 'Getting the WHY' },
             { k: 'framework', label: 'Framework' },
             { k: 'tonality', label: 'Tonality' },
             { k: 'question', label: 'Questions' },
