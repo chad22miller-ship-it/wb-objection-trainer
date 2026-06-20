@@ -1,0 +1,1193 @@
+import { useState, useRef, useEffect, useCallback } from 'react';
+import { supabase } from './lib/supabase';
+import { store } from './lib/store';
+import { callAPI } from './lib/api';
+import {
+  cleanForSpeech, chunkText, clamp, median, autoCorrelate,
+  parseScores, parseDebriefScores,
+  CALIB_PHRASE, CALIB_WORDS, REF_HZ, BASELINE_WPM,
+} from './lib/speech';
+import {
+  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_DEBRIEF,
+  ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT,
+  PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
+} from './constants';
+import Auth from './components/Auth';
+import Admin from './components/Admin';
+
+/* ============================== MAIN APP ============================== */
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [authLoading, setAuthLoading] = useState(true);
+
+  // Check for existing session on mount
+  useEffect(() => {
+    if (!supabase) { setAuthLoading(false); return; }
+    supabase.auth.getSession().then(({ data }) => {
+      setUser(data.session?.user || null);
+      setAuthLoading(false);
+    });
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user || null);
+    });
+    return () => listener?.subscription?.unsubscribe();
+  }, []);
+
+  if (authLoading) {
+    return <div style={{ minHeight: '100vh', background: '#0F1419', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8899A6' }}>Loading…</div>;
+  }
+
+  // If Supabase is configured, require auth. Otherwise run without auth (local dev).
+  if (supabase && !user) {
+    return <Auth onAuth={setUser} />;
+  }
+
+  return <Trainer user={user} />;
+}
+
+function Trainer({ user }) {
+  const [view, setView] = useState('home');
+  const [mode, setMode] = useState(null);
+  const [difficulty, setDifficulty] = useState(3);
+  const [profileIdx, setProfileIdx] = useState(0);
+
+  const [messages, setMessages] = useState([]);
+  const [rounds, setRounds] = useState([]);
+  const [input, setInput] = useState('');
+  const [loading, setLoading] = useState(false);
+
+  // FIX #1: messagesRef prevents stale closures in call mode
+  const messagesRef = useRef([]);
+  useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const roundsRef = useRef([]);
+  useEffect(() => { roundsRef.current = rounds; }, [rounds]);
+
+  const [voiceEnabled, setVoiceEnabled] = useState(true);
+  const [voices, setVoices] = useState([]);
+  const [selectedVoiceName, setSelectedVoiceName] = useState('');
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeaking, setIsSpeaking] = useState(false);
+
+  const [calib, setCalib] = useState({ done: false, pitch: 1.0, rate: 1.0, hz: null, wpm: null });
+  const [calibrating, setCalibrating] = useState(false);
+  const [calibStatus, setCalibStatus] = useState('idle');
+  const [calibError, setCalibError] = useState('');
+  const [recSeconds, setRecSeconds] = useState(0);
+
+  const [callMode, setCallMode] = useState(false);
+  const [callState, setCallState] = useState('idle');
+  const [liveTranscript, setLiveTranscript] = useState('');
+  const [callError, setCallError] = useState('');
+
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [hintOpen, setHintOpen] = useState(false);
+  const [hintMenu, setHintMenu] = useState(false);
+  const [hintType, setHintType] = useState('');
+  const [hintText, setHintText] = useState('');
+  const [hintLoading, setHintLoading] = useState(false);
+
+  // Session timer
+  const [elapsed, setElapsed] = useState(0);
+  const elapsedRef = useRef(null);
+
+  // Roleplay debrief
+  const [debriefText, setDebriefText] = useState('');
+  const [debriefScores, setDebriefScores] = useState(null);
+  const [debriefLoading, setDebriefLoading] = useState(false);
+  const [showDebrief, setShowDebrief] = useState(false);
+
+  const [history, setHistory] = useState([]);
+  const [expanded, setExpanded] = useState(null);
+  const [patternText, setPatternText] = useState('');
+  const [patternLoading, setPatternLoading] = useState(false);
+  const [showPattern, setShowPattern] = useState(false);
+
+  const chatEndRef = useRef(null);
+  const inputRef = useRef(null);
+  const synthRef = useRef(null);
+  const voicesRef = useRef([]);
+  const recognitionRef = useRef(null);
+  const sessionRef = useRef({ id: null, startedAt: null });
+  const calibRef = useRef({ pitch: 1.0, rate: 1.0 });
+  const audioCtxRef = useRef(null);
+  const micStreamRef = useRef(null);
+  const pitchSamplesRef = useRef([]);
+  const recStartRef = useRef(0);
+  const samplerRef = useRef(null);
+  const timerRef = useRef(null);
+  const callActiveRef = useRef(false);
+  const callRecRef = useRef(null);
+  const silenceTimerRef = useRef(null);
+  const handleTurnRef = useRef(null);
+  const startListeningRef = useRef(null);
+  const modeRef = useRef(null);
+  const difficultyRef = useRef(3);
+  const profileIdxRef = useRef(0);
+
+  useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
+  useEffect(() => { profileIdxRef.current = profileIdx; }, [profileIdx]);
+
+  /* ---------- voice setup ---------- */
+  useEffect(() => {
+    synthRef.current = window.speechSynthesis;
+    const pickDefault = (vs) => {
+      const pref = ['Natural', 'Neural', 'Google US English', 'Samantha', 'Ava', 'Aria', 'Jenny'];
+      for (const p of pref) { const f = vs.find((v) => v.lang.startsWith('en') && v.name.includes(p)); if (f) return f; }
+      return vs.find((v) => v.lang.startsWith('en')) || vs[0];
+    };
+    const load = () => {
+      if (!synthRef.current) return;
+      const vs = synthRef.current.getVoices().filter((v) => v.lang.startsWith('en'));
+      voicesRef.current = vs;
+      setVoices(vs);
+      setSelectedVoiceName((prev) => prev || (pickDefault(vs)?.name || ''));
+    };
+    load();
+    if (synthRef.current) synthRef.current.onvoiceschanged = load;
+    (async () => {
+      const saved = await store.get('voice_calib');
+      if (saved && saved.done) { setCalib(saved); calibRef.current = { pitch: saved.pitch, rate: saved.rate }; }
+    })();
+    return () => {
+      if (synthRef.current) synthRef.current.cancel();
+      if (recognitionRef.current) recognitionRef.current.abort();
+      if (samplerRef.current) clearInterval(samplerRef.current);
+      if (timerRef.current) clearInterval(timerRef.current);
+      if (micStreamRef.current) micStreamRef.current.getTracks().forEach((t) => t.stop());
+      if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {});
+    };
+  }, []);
+
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, hintText]);
+
+  const pickVoice = useCallback(() => {
+    const vs = voicesRef.current;
+    if (!vs || !vs.length) return null;
+    if (selectedVoiceName) { const f = vs.find((v) => v.name === selectedVoiceName); if (f) return f; }
+    return vs.find((v) => v.lang.startsWith('en')) || vs[0];
+  }, [selectedVoiceName]);
+
+  const stopSpeaking = useCallback(() => {
+    if (synthRef.current) synthRef.current.cancel();
+    setIsSpeaking(false);
+  }, []);
+
+  const speak = useCallback((text, onDone) => {
+    if (!voiceEnabled || !synthRef.current) { if (onDone) onDone(); return; }
+    synthRef.current.cancel();
+    const chunks = chunkText(cleanForSpeech(text));
+    const voice = pickVoice();
+    setIsSpeaking(true);
+    let i = 0;
+    const next = () => {
+      if (i >= chunks.length) { setIsSpeaking(false); if (onDone) onDone(); return; }
+      const u = new SpeechSynthesisUtterance(chunks[i]);
+      if (voice) u.voice = voice;
+      u.rate = calibRef.current.rate || 1.0;
+      u.pitch = calibRef.current.pitch || 1.0;
+      u.onend = () => { i += 1; next(); };
+      u.onerror = () => { i += 1; next(); };
+      synthRef.current.speak(u);
+    };
+    next();
+  }, [voiceEnabled, pickVoice]);
+
+  /* ---------- voice calibration ---------- */
+  const applyCalib = useCallback((next) => {
+    calibRef.current = { pitch: next.pitch, rate: next.rate };
+    setCalib(next);
+    store.set('voice_calib', next);
+  }, []);
+
+  const setPitchManual = useCallback((p) => applyCalib({ ...calib, done: true, pitch: clamp(p, 0.5, 2.0) }), [calib, applyCalib]);
+  const setRateManual = useCallback((r) => applyCalib({ ...calib, done: true, rate: clamp(r, 0.5, 1.6) }), [calib, applyCalib]);
+  const resetCalib = useCallback(() => applyCalib({ done: false, pitch: 1.0, rate: 1.0, hz: null, wpm: null }), [applyCalib]);
+
+  const cleanupMic = useCallback(() => {
+    if (samplerRef.current) { clearInterval(samplerRef.current); samplerRef.current = null; }
+    if (timerRef.current) { clearInterval(timerRef.current); timerRef.current = null; }
+    if (micStreamRef.current) { micStreamRef.current.getTracks().forEach((t) => t.stop()); micStreamRef.current = null; }
+    if (audioCtxRef.current) { audioCtxRef.current.close().catch(() => {}); audioCtxRef.current = null; }
+  }, []);
+
+  const openCalibration = useCallback(() => {
+    stopSpeaking();
+    if (recognitionRef.current) recognitionRef.current.abort();
+    setCalibError(''); setCalibStatus('idle'); setRecSeconds(0); setCalibrating(true); setSettingsOpen(false);
+  }, [stopSpeaking]);
+
+  const closeCalibration = useCallback(() => { cleanupMic(); setCalibrating(false); setCalibStatus('idle'); setRecSeconds(0); }, [cleanupMic]);
+
+  const beginRecord = useCallback(async () => {
+    setCalibError('');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      micStreamRef.current = stream;
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      const ctx = new Ctx(); audioCtxRef.current = ctx;
+      const src = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser(); analyser.fftSize = 2048;
+      src.connect(analyser);
+      const buf = new Float32Array(analyser.fftSize);
+      pitchSamplesRef.current = [];
+      recStartRef.current = Date.now();
+      setRecSeconds(0); setCalibStatus('recording');
+      samplerRef.current = setInterval(() => {
+        analyser.getFloatTimeDomainData(buf);
+        const f = autoCorrelate(buf, ctx.sampleRate);
+        if (f > 0) pitchSamplesRef.current.push(f);
+      }, 90);
+      timerRef.current = setInterval(() => setRecSeconds(Math.round((Date.now() - recStartRef.current) / 1000)), 250);
+    } catch (e) {
+      setCalibError("Couldn't reach your mic. Check browser mic permission and try again.");
+      setCalibStatus('error'); cleanupMic();
+    }
+  }, [cleanupMic]);
+
+  const stopRecord = useCallback(() => {
+    const durationSec = (Date.now() - recStartRef.current) / 1000;
+    const samples = pitchSamplesRef.current.slice();
+    cleanupMic(); setCalibStatus('analyzing');
+    if (durationSec < 1.5 || samples.length < 8) {
+      setCalibError('Didn\'t catch enough. Read the full line out loud, then tap Stop.');
+      setCalibStatus('error'); return;
+    }
+    const hz = median(samples);
+    const wpm = CALIB_WORDS / (durationSec / 60);
+    const pitch = clamp(hz / REF_HZ, 0.6, 1.8);
+    const rate = clamp(wpm / BASELINE_WPM, 0.7, 1.5);
+    const next = { done: true, pitch: Math.round(pitch * 100) / 100, rate: Math.round(rate * 100) / 100, hz: Math.round(hz), wpm: Math.round(wpm) };
+    applyCalib(next); setCalibStatus('done');
+  }, [cleanupMic, applyCalib]);
+
+  const testCalibVoice = useCallback(() => {
+    if (!synthRef.current) return;
+    synthRef.current.cancel();
+    const u = new SpeechSynthesisUtterance("Hey, thanks for jumping on. I'm curious — what made you take this call today?");
+    const v = pickVoice(); if (v) u.voice = v;
+    u.rate = calibRef.current.rate || 1.0; u.pitch = calibRef.current.pitch || 1.0;
+    synthRef.current.speak(u);
+  }, [pickVoice]);
+
+  /* ---------- hands-free call mode ---------- */
+  startListeningRef.current = () => {
+    if (!callActiveRef.current) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setCallState('error'); setCallError('No speech recognition. Open in Chrome/Edge.'); return; }
+    if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} }
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    const r = new SR();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = 'en-US';
+    r.maxAlternatives = 1;
+    let buf = '';
+    let lastResultTime = Date.now();
+    r.onresult = (e) => {
+      lastResultTime = Date.now();
+      if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
+      }
+      setLiveTranscript((buf + interim).trim());
+      silenceTimerRef.current = setTimeout(() => {
+        if (!callActiveRef.current) return;
+        const said = buf.trim();
+        if (said.length > 1) {
+          if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
+          if (handleTurnRef.current) handleTurnRef.current(said);
+        }
+      }, 1500);
+    };
+    r.onerror = (ev) => {
+      if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
+        callActiveRef.current = false; setCallState('error');
+        setCallError('Microphone is blocked. Allow mic access in your browser and try again.');
+      } else if (ev.error === 'network') {
+        callActiveRef.current = false; setCallState('error');
+        setCallError('Speech recognition lost network. Check your connection and try again.');
+      } else if (ev.error === 'no-speech') {
+        // no-speech is not fatal — just restart
+      }
+    };
+    r.onend = () => {
+      if (!callActiveRef.current) return;
+      if (silenceTimerRef.current) return;
+      const said = buf.trim();
+      if (said.length > 1 && handleTurnRef.current) handleTurnRef.current(said);
+      else setTimeout(() => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); }, 200);
+    };
+    callRecRef.current = r;
+    try { r.start(); } catch (e) {
+      setTimeout(() => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); }, 300);
+    }
+  };
+
+  // FIX #1 continued: handleTurn reads from refs, not stale state
+  handleTurnRef.current = async (text) => {
+    if (!callActiveRef.current) return;
+    setCallState('thinking'); setLiveTranscript('');
+    const reply = await sendTextFromRef(text);
+    if (!callActiveRef.current) return;
+    if (!reply) { setCallState('listening'); if (startListeningRef.current) startListeningRef.current(); return; }
+    setCallState('speaking');
+    speak(reply, () => {
+      if (!callActiveRef.current) return;
+      setCallState('listening');
+      if (startListeningRef.current) startListeningRef.current();
+    });
+  };
+
+  const startCall = useCallback(async () => {
+    if (typeof window === 'undefined') return;
+    setCallError('');
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { setCallMode(true); setCallState('error'); setCallError('Live voice needs Chrome or Edge.'); return; }
+    stopSpeaking(); setHintMenu(false); setSettingsOpen(false);
+    setCallMode(true); setCallState('connecting');
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (e) {
+      setCallState('error'); setCallError("Couldn't get mic access. Allow microphone in your browser settings."); return;
+    }
+    callActiveRef.current = true;
+    setCallState('listening'); setLiveTranscript('');
+    setTimeout(() => { if (startListeningRef.current) startListeningRef.current(); }, 250);
+  }, [stopSpeaking]);
+
+  const endCall = useCallback(() => {
+    callActiveRef.current = false;
+    if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+    if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
+    stopSpeaking();
+    setCallMode(false); setCallState('idle'); setLiveTranscript(''); setCallError('');
+  }, [stopSpeaking]);
+
+  const bargeIn = useCallback(() => {
+    if (callState !== 'speaking') return;
+    stopSpeaking(); setCallState('listening');
+    if (startListeningRef.current) startListeningRef.current();
+  }, [callState, stopSpeaking]);
+
+  /* ---------- push-to-talk (text mode) ---------- */
+  const startListening = useCallback(() => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { alert('Speech recognition needs Chrome or Edge.'); return; }
+    stopSpeaking();
+    const r = new SR();
+    r.continuous = true;
+    r.interimResults = true;
+    r.lang = 'en-US';
+    r.maxAlternatives = 1;
+    let buf = '';
+    r.onstart = () => setIsListening(true);
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
+      }
+      setInput((buf + interim).trim());
+    };
+    r.onend = () => setIsListening(false);
+    r.onerror = () => setIsListening(false);
+    recognitionRef.current = r; r.start();
+  }, [stopSpeaking]);
+
+  const stopListening = useCallback(() => {
+    if (recognitionRef.current) recognitionRef.current.stop();
+    setIsListening(false);
+  }, []);
+
+  /* ---------- system prompt builder ---------- */
+  const buildSystem = useCallback((m, diff, pIdx) => {
+    if (m === 'drill') return SYSTEM_DRILL + '\n\n' + DRILL_DIFF[diff];
+    return SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff] + '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
+  }, []);
+
+  /* ---------- save session ---------- */
+  const saveSession = useCallback(async (msgs, rnds, extra = {}) => {
+    const meta = sessionRef.current;
+    if (!meta.id) return;
+    await store.set(meta.id, {
+      id: meta.id, startedAt: meta.startedAt, mode: meta.mode, difficulty: meta.difficulty,
+      profileIdx: meta.profileIdx,
+      prospectName: meta.prospectName,
+      prospectVibe: meta.prospectVibe,
+      messages: msgs, rounds: rnds,
+      ...extra,
+    });
+  }, []);
+
+  /* ---------- session timer ---------- */
+  const startTimer = useCallback(() => {
+    setElapsed(0);
+    if (elapsedRef.current) clearInterval(elapsedRef.current);
+    const start = Date.now();
+    elapsedRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - start) / 1000)), 1000);
+  }, []);
+  const stopTimer = useCallback(() => { if (elapsedRef.current) { clearInterval(elapsedRef.current); elapsedRef.current = null; } }, []);
+  const formatTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+
+  /* ---------- session start ---------- */
+  const startSession = useCallback(async (m, diff) => {
+    stopSpeaking(); stopTimer();
+    const id = 'sess_' + Date.now();
+    const pIdx = Math.floor(Math.random() * PROSPECT_PROFILES.length);
+    const prospect = PROSPECT_PROFILES[pIdx];
+
+    sessionRef.current = {
+      id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
+      profileIdx: pIdx, prospectName: prospect.name, prospectVibe: prospect.vibe,
+    };
+
+    setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
+    setMessages([]); setRounds([]); setInput('');
+    setHintOpen(false); setHintMenu(false); setHintText(''); setSettingsOpen(false);
+    setShowDebrief(false); setDebriefText(''); setDebriefScores(null);
+    setLoading(true); startTimer();
+
+    if (m === 'roleplay') {
+      // FIX #2: NO auto-opener. The rep types/speaks their own first line.
+      // We just show a prompt telling them to open the call.
+      setMessages([]);
+      setLoading(false);
+    } else {
+      const reply = await callAPI([{ role: 'user', content: "I'm ready. Let's go." }], buildSystem(m, diff, pIdx));
+      const msgs = [{ role: 'assistant', content: reply }];
+      setMessages(msgs); await saveSession(msgs, []); speak(reply);
+      setLoading(false);
+    }
+  }, [buildSystem, saveSession, speak, stopSpeaking, startTimer, stopTimer]);
+
+  /* ---------- send (ref-based for call mode) ---------- */
+  const sendTextFromRef = useCallback(async (text) => {
+    const t = (text || '').trim();
+    if (!t) return null;
+    stopSpeaking();
+
+    const curMsgs = messagesRef.current;
+    const userMsg = { role: 'user', content: t };
+    const newMsgs = [...curMsgs, userMsg];
+    setMessages(newMsgs); setLoading(true);
+
+    const reply = await callAPI(
+      newMsgs.map((m) => ({ role: m.role, content: m.content })),
+      buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current)
+    );
+    const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
+    setMessages(finalMsgs);
+
+    let nextRounds = roundsRef.current;
+    if (modeRef.current === 'drill') {
+      const s = parseScores(reply);
+      if (s) { nextRounds = [...nextRounds, s]; setRounds(nextRounds); }
+    }
+    await saveSession(finalMsgs, nextRounds);
+    setLoading(false);
+    return reply;
+  }, [buildSystem, saveSession, stopSpeaking]);
+
+  const sendMessage = useCallback(async () => {
+    const t = input.trim();
+    if (!t || loading) return;
+    setInput(''); setHintMenu(false);
+    const reply = await sendTextFromRef(t);
+    if (reply) speak(reply);
+  }, [input, loading, sendTextFromRef, speak]);
+
+  const handleKeyDown = useCallback((e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+  }, [sendMessage]);
+
+  /* ---------- roleplay debrief ---------- */
+  const runDebrief = useCallback(async () => {
+    stopTimer();
+    setDebriefLoading(true); setShowDebrief(true); setDebriefText(''); setDebriefScores(null);
+    const transcript = messagesRef.current
+      .map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
+    const reply = await callAPI(
+      [{ role: 'user', content: `Full roleplay transcript:\n\n${transcript}\n\nDebrief this rep.` }],
+      SYSTEM_DEBRIEF
+    );
+    setDebriefText(reply);
+    const scores = parseDebriefScores(reply);
+    setDebriefScores(scores);
+    await saveSession(messagesRef.current, roundsRef.current, { debrief: reply, debriefScores: scores });
+    setDebriefLoading(false);
+  }, [saveSession, stopTimer]);
+
+  /* ---------- hints ---------- */
+  const getHint = useCallback(async (type) => {
+    setHintType(type); setHintLoading(true); setHintText(''); setHintOpen(true); setHintMenu(false);
+    const transcript = messagesRef.current
+      .map((m) => `${m.role === 'user' ? 'REP' : (mode === 'roleplay' ? 'PROSPECT' : 'DRILL')}: ${m.content}`).join('\n\n');
+    const sys = type === 'strategy' ? HINT_STRATEGY : HINT_WORDS;
+    const reply = await callAPI([{ role: 'user', content: `Transcript so far:\n\n${transcript || '(conversation just started)'}\n\nGive me the hint.` }], sys);
+    setHintText(reply); setHintLoading(false);
+  }, [mode]);
+
+  const insertSelection = useCallback(() => {
+    const sel = (typeof window !== 'undefined' && window.getSelection) ? window.getSelection().toString().trim() : '';
+    if (sel) { setInput(sel); inputRef.current?.focus(); }
+  }, []);
+
+  /* ---------- history ---------- */
+  const loadHistory = useCallback(async () => {
+    const keys = await store.list('sess_');
+    const recs = [];
+    for (const k of keys) { const r = await store.get(k); if (r && r.messages && r.messages.length) recs.push(r); }
+    recs.sort((a, b) => (b.startedAt || '').localeCompare(a.startedAt || ''));
+    setHistory(recs);
+  }, []);
+
+  const openHistory = useCallback(async () => {
+    stopSpeaking(); setSettingsOpen(false); setView('history');
+    setShowPattern(false); setPatternText('');
+    await loadHistory();
+  }, [loadHistory, stopSpeaking]);
+
+  const deleteSession = useCallback(async (id) => {
+    await store.del(id);
+    setHistory((h) => h.filter((s) => s.id !== id));
+  }, []);
+
+  const clearAll = useCallback(async () => {
+    if (!window.confirm('Wipe all practice history? This can\'t be undone.')) return;
+    const keys = await store.list('sess_');
+    for (const k of keys) await store.del(k);
+    setHistory([]); setShowPattern(false); setPatternText('');
+  }, []);
+
+  const runPattern = useCallback(async () => {
+    setShowPattern(true); setPatternLoading(true); setPatternText('');
+    const recent = history.slice(0, 8);
+    const compiled = recent.map((s, i) => {
+      const t = s.messages
+        .map((m) => `${m.role === 'user' ? 'REP' : 'OTHER'}: ${m.content}`).join('\n').slice(0, 3000);
+      return `--- SESSION ${i + 1} (${s.mode}, difficulty ${s.difficulty}) ---\n${t}`;
+    }).join('\n\n');
+    const reply = await callAPI([{ role: 'user', content: `Practice history:\n\n${compiled}\n\nGive me the pattern.` }], PATTERN_PROMPT);
+    setPatternText(reply); setPatternLoading(false);
+  }, [history]);
+
+  const handleLogout = useCallback(async () => {
+    if (supabase) await supabase.auth.signOut();
+  }, []);
+
+  /* ---------- drill stats ---------- */
+  const computeStats = () => {
+    const asc = [...history].sort((a, b) => (a.startedAt || '').localeCompare(b.startedAt || ''));
+    const allRounds = [];
+    let drillSessions = 0;
+    asc.forEach((s) => { if (s.mode === 'drill' && s.rounds && s.rounds.length) { drillSessions += 1; allRounds.push(...s.rounds); } });
+    const avg = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : 0);
+    const cat = (k) => avg(allRounds.map((r) => r[k]).filter((x) => x != null));
+    const overalls = allRounds.map((r) => r.overall).filter((x) => x != null);
+    const half = Math.floor(overalls.length / 2);
+    const trend = overalls.length >= 4 ? avg(overalls.slice(half)) - avg(overalls.slice(0, half)) : null;
+    return {
+      drillSessions, rounds: allRounds.length,
+      overall: cat('overall'), framework: cat('framework'), tonality: cat('tonality'),
+      question: cat('question'), silence: cat('silence'), trend,
+    };
+  };
+
+  /* ============================== RENDER ============================== */
+
+  if (view === 'admin') {
+    return <Admin onBack={() => setView('home')} />;
+  }
+
+  if (view === 'home') {
+    const displayName = user?.user_metadata?.display_name || user?.email?.split('@')[0] || '';
+    return (
+      <div style={S.container}>
+        <div style={S.landing}>
+          {user && (
+            <div style={S.userBar}>
+              <span style={S.userName}>{displayName}</span>
+              <button style={S.logoutBtn} onClick={() => setView('admin')}>Admin</button>
+              <button style={S.logoutBtn} onClick={handleLogout}>Sign out</button>
+            </div>
+          )}
+          <div style={S.logoMark}>WB</div>
+          <h1 style={S.title}>OBJECTION TRAINING</h1>
+          <p style={S.subtitle}>Pick your difficulty. Pick your drill.</p>
+
+          <div style={S.diffSelector}>
+            {DIFFICULTY_META.map((d) => (
+              <button key={d.level} onClick={() => setDifficulty(d.level)}
+                style={{ ...S.diffBtn, borderColor: difficulty === d.level ? d.color : '#2A3A4A', background: difficulty === d.level ? d.color : 'transparent', color: difficulty === d.level ? '#0F1419' : '#8899A6' }}>
+                <span style={S.diffNum}>{d.level}</span>
+                <span style={S.diffName}>{d.name}</span>
+              </button>
+            ))}
+          </div>
+
+          <div style={S.cardRow}>
+            <button style={S.card} onClick={() => startSession('roleplay', difficulty)}>
+              <div style={S.cardIcon}>🎭</div>
+              <div style={S.cardTitle}>THE PROSPECT</div>
+              <div style={S.cardDesc}>Full voice roleplay. A real prospect talks, you talk back. Run PPF discovery, bridge to NAOL, handle whatever they throw.</div>
+              <div style={S.cardTag}>CONVERSATION MUSCLE</div>
+            </button>
+            <button style={S.card} onClick={() => startSession('drill', difficulty)}>
+              <div style={S.cardIcon}>💥</div>
+              <div style={S.cardTitle}>THE GAUNTLET</div>
+              <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
+              <div style={S.cardTag}>PATTERN RECOGNITION</div>
+            </button>
+          </div>
+
+          <button style={S.historyLink} onClick={openHistory}>📊 History &amp; Patterns</button>
+        </div>
+      </div>
+    );
+  }
+
+  if (view === 'history') {
+    const stats = computeStats();
+    const bars = [
+      { k: 'framework', label: 'Framework Alignment' },
+      { k: 'tonality', label: 'Tonality / Energy' },
+      { k: 'question', label: 'Question Quality' },
+      { k: 'silence', label: 'Silence Discipline' },
+    ];
+    const lowest = bars.reduce((lo, b) => (stats[b.k] && (!lo || stats[b.k] < stats[lo.k]) ? b : lo), null);
+
+    return (
+      <div style={S.container}>
+        <div style={S.header}>
+          <button style={S.backBtn} onClick={() => setView('home')}>← Home</button>
+          <div style={S.headerTitle}>HISTORY &amp; PATTERNS</div>
+          <div style={S.headerRight}>
+            {history.length > 0 && <button style={S.newBtn} onClick={clearAll}>Clear all</button>}
+          </div>
+        </div>
+        <div style={S.historyScroll}>
+          {history.length === 0 && (
+            <div style={S.empty}>
+              <div style={{ fontSize: 36, marginBottom: 12 }}>📭</div>
+              No reps logged yet. Run a Prospect or Gauntlet session and your history shows up here.
+            </div>
+          )}
+          {history.length > 0 && (
+            <>
+              <button style={S.patternBtn} onClick={runPattern}>
+                {showPattern ? '↻ Re-run Pattern Analysis' : '🔍 Show Overall Pattern'}
+              </button>
+              {showPattern && (
+                <div style={S.patternPanel}>
+                  {stats.rounds > 0 && (
+                    <div style={S.statBlock}>
+                      <div style={S.statHeaderRow}>
+                        <div style={S.statBig}>{stats.overall.toFixed(1)}<span style={S.statBigUnit}>/10</span></div>
+                        <div style={S.statMeta}>
+                          <div>Overall average</div>
+                          <div style={S.statSub}>{stats.rounds} graded rounds · {stats.drillSessions} Gauntlet sessions</div>
+                          {stats.trend != null && (
+                            <div style={{ color: stats.trend >= 0 ? '#43A047' : '#E53935', fontSize: 12, fontWeight: 600, marginTop: 4 }}>
+                              {stats.trend >= 0 ? '▲' : '▼'} {Math.abs(stats.trend).toFixed(1)} {stats.trend >= 0 ? 'improving' : 'slipping'}
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                      {bars.map((b) => (
+                        <div key={b.k} style={S.barRow}>
+                          <div style={S.barLabel}>{b.label}</div>
+                          <div style={S.barTrack}>
+                            <div style={{ ...S.barFill, width: `${(stats[b.k] || 0) * 10}%`, background: stats[b.k] >= 7 ? '#43A047' : stats[b.k] >= 5 ? '#D4A843' : '#E53935' }} />
+                          </div>
+                          <div style={S.barVal}>{(stats[b.k] || 0).toFixed(1)}</div>
+                        </div>
+                      ))}
+                      {lowest && <div style={S.weakCallout}>⚠ Weakest muscle: <b>{lowest.label}</b></div>}
+                    </div>
+                  )}
+                  <div style={S.coachBlock}>
+                    <div style={S.coachLabel}>COACH READ</div>
+                    {patternLoading
+                      ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+                      : <div style={S.coachText}>{patternText}</div>
+                    }
+                  </div>
+                </div>
+              )}
+              <div style={S.sessionList}>
+                {history.map((s) => {
+                  const d = diffMeta(s.difficulty);
+                  const avg = s.rounds && s.rounds.length ? (s.rounds.reduce((a, b) => a + b.overall, 0) / s.rounds.length).toFixed(1) : null;
+                  const dbScore = s.debriefScores?.overall;
+                  const score = avg || (dbScore ? `${dbScore}/10` : null);
+                  const reps = s.messages.filter((m) => m.role === 'user').length;
+                  const date = new Date(s.startedAt);
+                  const isOpen = expanded === s.id;
+                  return (
+                    <div key={s.id} style={S.sessionCard}>
+                      <div style={S.sessionTop} onClick={() => setExpanded(isOpen ? null : s.id)}>
+                        <div style={S.sessionLeft}>
+                          <span style={{ ...S.modePill, background: s.mode === 'drill' ? '#3A2A4A' : '#2A3A4A' }}>
+                            {s.mode === 'drill' ? 'GAUNTLET' : 'PROSPECT'}
+                          </span>
+                          <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
+                          {s.prospectName && <span style={S.prospectTag}>{s.prospectName}</span>}
+                        </div>
+                        <div style={S.sessionRight}>
+                          {score ? <span style={S.sessionScore}>{score}</span> : <span style={S.sessionScoreMuted}>{reps} turns</span>}
+                          <span style={S.sessionDate}>{date.toLocaleDateString()} {date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+                          <button style={S.delBtn} onClick={(e) => { e.stopPropagation(); deleteSession(s.id); }}>✕</button>
+                        </div>
+                      </div>
+                      {isOpen && (
+                        <div style={S.transcript}>
+                          {s.messages.map((m, i) => (
+                            <div key={i} style={S.tLine}>
+                              <span style={{ ...S.tWho, color: m.role === 'user' ? '#6FA8DC' : '#D4A843' }}>
+                                {m.role === 'user' ? 'YOU' : (s.mode === 'drill' ? 'DRILL' : s.prospectName || 'PROSPECT')}
+                              </span>
+                              <span style={S.tText}>{m.content}</span>
+                            </div>
+                          ))}
+                          {s.debrief && (
+                            <div style={S.debriefInHistory}>
+                              <div style={S.coachLabel}>DEBRIEF</div>
+                              <div style={S.tText}>{s.debrief}</div>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  /* ---------- CHAT VIEW ---------- */
+  const d = diffMeta(difficulty);
+  const prospect = PROSPECT_PROFILES[profileIdx];
+  const noMessages = messages.length === 0;
+
+  return (
+    <div style={S.container}>
+      <div style={S.header}>
+        <button style={S.backBtn} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
+        <div style={S.headerCenter}>
+          <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : 'THE GAUNTLET'}</span>
+          <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
+          <span style={S.timerBadge}>{formatTime(elapsed)}</span>
+          {mode === 'drill' && rounds.length > 0 && (
+            <span style={S.scoreBadge}>{(rounds.reduce((a, b) => a + b.overall, 0) / rounds.length).toFixed(1)}/10 · R{rounds.length + 1}</span>
+          )}
+        </div>
+        <div style={S.headerRight}>
+          <button style={{ ...S.iconBtn, background: voiceEnabled ? '#D4A843' : '#1A2332', color: voiceEnabled ? '#0F1419' : '#8899A6' }}
+            onClick={() => { setVoiceEnabled((v) => !v); if (voiceEnabled) stopSpeaking(); }} title="Toggle voice">
+            {voiceEnabled ? '🔊' : '🔇'}
+          </button>
+          <button style={S.iconBtn} onClick={() => setSettingsOpen((o) => !o)} title="Settings">⚙</button>
+        </div>
+
+        {settingsOpen && (
+          <div style={S.settingsPanel}>
+            <div style={S.settingLabel}>DIFFICULTY</div>
+            <div style={S.diffMini}>
+              {DIFFICULTY_META.map((dm) => (
+                <button key={dm.level} onClick={() => startSession(mode, dm.level)}
+                  style={{ ...S.diffMiniBtn, borderColor: difficulty === dm.level ? dm.color : '#2A3A4A', background: difficulty === dm.level ? dm.color : 'transparent', color: difficulty === dm.level ? '#0F1419' : '#8899A6' }}>
+                  {dm.level}
+                </button>
+              ))}
+            </div>
+            <div style={S.settingLabel}>VOICE</div>
+            <select value={selectedVoiceName} onChange={(e) => setSelectedVoiceName(e.target.value)} style={S.voiceSelect}>
+              {voices.length === 0 && <option>Loading voices…</option>}
+              {voices.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
+            </select>
+            <div style={S.settingLabel}>MY VOICE MATCH {calib.done && <span style={S.calibTag}>✓ on</span>}</div>
+            <button style={S.calibBtn} onClick={openCalibration}>🎙 {calib.done ? 'Re-calibrate' : 'Calibrate to my voice'}</button>
+            {calib.done && calib.hz && <div style={S.calibReadout}>~{calib.hz} Hz · ~{calib.wpm} wpm</div>}
+            <div style={S.sliderRow}>
+              <span style={S.sliderLabel}>Pitch</span>
+              <input type="range" min="0.5" max="2" step="0.05" value={calib.pitch} onChange={(e) => setPitchManual(parseFloat(e.target.value))} style={S.slider} />
+              <span style={S.sliderVal}>{calib.pitch.toFixed(2)}</span>
+            </div>
+            <div style={S.sliderRow}>
+              <span style={S.sliderLabel}>Speed</span>
+              <input type="range" min="0.5" max="1.6" step="0.05" value={calib.rate} onChange={(e) => setRateManual(parseFloat(e.target.value))} style={S.slider} />
+              <span style={S.sliderVal}>{calib.rate.toFixed(2)}</span>
+            </div>
+            <div style={S.calibActions}>
+              <button style={S.testVoiceBtn} onClick={testCalibVoice}>▶ Test</button>
+              {calib.done && <button style={S.calibResetBtn} onClick={resetCalib}>Reset</button>}
+            </div>
+            <button style={S.restartBtn} onClick={() => startSession(mode, difficulty)}>{mode === 'roleplay' ? 'New prospect' : 'Restart drill'}</button>
+          </div>
+        )}
+      </div>
+
+      {calibrating && (
+        <div style={S.calibOverlay} onClick={(e) => { if (e.target === e.currentTarget) closeCalibration(); }}>
+          <div style={S.calibModal}>
+            <div style={S.calibModalHead}>
+              <span style={S.calibModalTitle}>🎙 MATCH MY VOICE</span>
+              <button style={S.hintClose} onClick={closeCalibration}>✕</button>
+            </div>
+            <div style={S.calibIntro}>Read this out loud at your normal speaking voice and pace:</div>
+            <div style={S.calibPhrase}>"{CALIB_PHRASE}"</div>
+            {calibStatus === 'idle' && <button style={S.calibRecordBtn} onClick={beginRecord}>● Start recording</button>}
+            {calibStatus === 'recording' && (
+              <>
+                <div style={S.calibLive}><span style={S.calibLiveDot}>●</span> Recording… {recSeconds}s</div>
+                <button style={{ ...S.calibRecordBtn, background: '#E53935', borderColor: '#E53935', color: '#fff' }} onClick={stopRecord}>■ Stop &amp; match</button>
+              </>
+            )}
+            {calibStatus === 'analyzing' && <div style={S.calibLive}>Analyzing…</div>}
+            {calibStatus === 'done' && (
+              <>
+                <div style={S.calibDone}>✓ Matched — ~{calib.hz} Hz, ~{calib.wpm} wpm</div>
+                <div style={S.calibActions}>
+                  <button style={S.calibRecordBtn} onClick={testCalibVoice}>▶ Hear it</button>
+                  <button style={{ ...S.calibRecordBtn, background: 'transparent', color: '#8899A6', borderColor: '#2A3A4A' }} onClick={beginRecord}>↻ Redo</button>
+                </div>
+                <button style={S.calibFinishBtn} onClick={closeCalibration}>Done</button>
+              </>
+            )}
+            {calibStatus === 'error' && (
+              <>
+                <div style={S.calibErr}>{calibError}</div>
+                <button style={S.calibRecordBtn} onClick={beginRecord}>● Try again</button>
+              </>
+            )}
+          </div>
+        </div>
+      )}
+
+      <div style={S.chatArea} onClick={() => settingsOpen && setSettingsOpen(false)}>
+        {/* FIX #2: Roleplay shows prospect info and prompts rep to open */}
+        {mode === 'roleplay' && noMessages && !loading && (
+          <div style={S.prospectCard}>
+            <div style={S.prospectName}>{prospect.name}</div>
+            <div style={S.prospectVibe}>{prospect.vibe}</div>
+            <div style={S.prospectPrompt}>Open the call. Say whatever you'd say in real life.</div>
+          </div>
+        )}
+
+        {messages.map((m, i) => (
+          <div key={i} style={{ ...S.msgRow, justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}>
+            <div style={{ ...S.msgBubble, ...(m.role === 'user' ? S.userBubble : S.botBubble) }}>
+              {m.role === 'assistant' && (
+                <div style={S.speakerLabel}>
+                  {mode === 'roleplay' ? prospect.name.toUpperCase() : 'DRILL SGT'}
+                </div>
+              )}
+              <div style={S.msgText}>{m.content}</div>
+              {m.role === 'assistant' && (
+                <button style={S.replayBtn} onClick={() => speak(m.content)} title="Replay">🔄</button>
+              )}
+            </div>
+          </div>
+        ))}
+        {loading && (
+          <div style={{ ...S.msgRow, justifyContent: 'flex-start' }}>
+            <div style={{ ...S.msgBubble, ...S.botBubble }}>
+              <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+            </div>
+          </div>
+        )}
+
+        {/* Roleplay debrief */}
+        {showDebrief && (
+          <div style={S.debriefPanel}>
+            <div style={S.coachLabel}>📋 SESSION DEBRIEF</div>
+            {debriefLoading
+              ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+              : <div style={S.coachText}>{debriefText}</div>
+            }
+          </div>
+        )}
+
+        <div ref={chatEndRef} />
+      </div>
+
+      {hintOpen && (
+        <div style={S.hintCard}>
+          <div style={S.hintHeader}>
+            <span style={S.hintLabel}>💡 {hintType === 'strategy' ? 'STRATEGY' : 'EXACT WORDS'}</span>
+            <div style={S.hintHeaderRight}>
+              <button style={{ ...S.hintSendTop, opacity: loading || !input.trim() ? 0.4 : 1 }} onClick={sendMessage} disabled={loading || !input.trim()}>▶ Send</button>
+              <button style={S.hintClose} onClick={() => setHintOpen(false)}>✕</button>
+            </div>
+          </div>
+          {hintLoading
+            ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+            : (
+              <>
+                <div style={S.hintText} onMouseUp={insertSelection} onTouchEnd={insertSelection}>{hintText}</div>
+                <div style={S.hintTip}>Highlight text to drop it into your reply.</div>
+              </>
+            )
+          }
+        </div>
+      )}
+
+      {isSpeaking && !callMode && (
+        <div style={S.speakingBar}>
+          <span style={S.speakingPulse}>🔊 Speaking…</span>
+          <button style={S.stopSpeakBtn} onClick={stopSpeaking}>Stop</button>
+        </div>
+      )}
+
+      {callMode && (
+        <div style={S.callPanel}>
+          {callState === 'error' ? (
+            <div style={S.callPanelErr}>
+              <div style={S.callPanelErrHead}>
+                <span style={S.callPanelErrTitle}>🎙️🚫 Mic issue</span>
+                <button style={S.callPanelX} onClick={endCall}>✕</button>
+              </div>
+              <div style={S.callPanelErrMsg}>{callError}</div>
+              <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+                <button style={S.callRetryBtn} onClick={startCall}>↻ Retry</button>
+                <button style={S.callCloseBtn} onClick={endCall}>Close</button>
+              </div>
+            </div>
+          ) : (
+            <div style={S.callPanelLive}>
+              <div onClick={bargeIn} style={{
+                ...S.callMiniOrb,
+                ...(callState === 'listening' ? S.callOrbListening : {}),
+                ...(callState === 'thinking' ? S.callOrbThinking : {}),
+                ...(callState === 'speaking' ? S.callOrbSpeaking : {}),
+              }}>
+                {callState === 'connecting' && '◌'}
+                {callState === 'listening' && '🎙'}
+                {callState === 'thinking' && '◐'}
+                {callState === 'speaking' && '🔊'}
+              </div>
+              <div style={S.callPanelMid}>
+                <div style={S.callPanelState}>
+                  {callState === 'connecting' && 'Connecting…'}
+                  {callState === 'listening' && 'Listening — just talk'}
+                  {callState === 'thinking' && 'Thinking…'}
+                  {callState === 'speaking' && 'Speaking — tap orb to cut in'}
+                </div>
+                <div style={S.callPanelCaption}>
+                  {callState === 'listening' && (liveTranscript || '…')}
+                  {callState === 'speaking' && (() => { const lb = [...messages].reverse().find((m) => m.role === 'assistant'); return lb ? lb.content : ''; })()}
+                  {callState === 'connecting' && 'Allow the mic if your browser asks.'}
+                </div>
+              </div>
+              <button style={S.callEndInline} onClick={endCall}>End</button>
+            </div>
+          )}
+        </div>
+      )}
+
+      <div style={S.actionBar}>
+        <div style={S.hintWrap}>
+          <button style={S.hintTrigger} onClick={() => setHintMenu((o) => !o)}>💡 Hint ▾</button>
+          {hintMenu && (
+            <div style={S.hintMenuPop}>
+              <button style={S.hintOption} onClick={() => getHint('strategy')}>
+                <b>Strategy</b><span style={S.hintOptDesc}>Which tool / phase to run now</span>
+              </button>
+              <button style={S.hintOption} onClick={() => getHint('words')}>
+                <b>Exact words</b><span style={S.hintOptDesc}>A line to say next</span>
+              </button>
+            </div>
+          )}
+        </div>
+        {mode === 'roleplay' && messages.length >= 4 && !showDebrief && (
+          <button style={S.debriefBtn} onClick={runDebrief}>📋 End &amp; Debrief</button>
+        )}
+      </div>
+
+      <div style={S.inputArea}>
+        <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
+        <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+          placeholder={noMessages && mode === 'roleplay' ? "Open the call — what do you say?" : "Type your reply, or tap 📞 for a live call…"}
+          style={S.input} rows={2} disabled={loading} />
+        <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
+      </div>
+    </div>
+  );
+}
+
+/* ============================== STYLES ============================== */
+
+const S = {
+  container: { minHeight: '100vh', background: '#0F1419', color: '#E8E6E1', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display: 'flex', flexDirection: 'column' },
+  landing: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: '24px' },
+  logoMark: { fontSize: 14, fontWeight: 700, letterSpacing: '3px', color: '#D4A843', border: '1px solid #D4A843', padding: '6px 14px', marginBottom: 28 },
+  title: { fontSize: 28, fontWeight: 800, letterSpacing: '4px', margin: '0 0 8px 0' },
+  subtitle: { fontSize: 14, color: '#8899A6', margin: '0 0 28px 0' },
+
+  userBar: { position: 'absolute', top: 16, right: 20, display: 'flex', alignItems: 'center', gap: 12 },
+  userName: { fontSize: 13, color: '#8899A6' },
+  logoutBtn: { background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 11, padding: '5px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
+
+  diffSelector: { display: 'flex', gap: 8, marginBottom: 32, flexWrap: 'wrap', justifyContent: 'center' },
+  diffBtn: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, border: '1px solid', borderRadius: 8, padding: '8px 14px', cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s', minWidth: 64 },
+  diffNum: { fontSize: 16, fontWeight: 800 },
+  diffName: { fontSize: 10, letterSpacing: '1px', fontWeight: 600 },
+
+  cardRow: { display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 720 },
+  card: { background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: '30px 24px', width: 310, cursor: 'pointer', textAlign: 'left', color: '#E8E6E1', transition: 'border-color .2s, transform .2s', fontFamily: 'inherit' },
+  cardIcon: { fontSize: 30, marginBottom: 14 },
+  cardTitle: { fontSize: 18, fontWeight: 700, letterSpacing: '2px', marginBottom: 12, color: '#D4A843' },
+  cardDesc: { fontSize: 13, lineHeight: 1.6, color: '#8899A6', marginBottom: 18 },
+  cardTag: { fontSize: 10, letterSpacing: '2px', color: '#D4A843', fontWeight: 700, borderTop: '1px solid #2A3A4A', paddingTop: 12 },
+  historyLink: { marginTop: 32, background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
+
+  header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid #1A2332', background: '#0F1419', position: 'sticky', top: 0, zIndex: 20 },
+  headerCenter: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
+  backBtn: { background: 'none', border: 'none', color: '#8899A6', fontSize: 13, cursor: 'pointer', fontFamily: 'inherit', padding: '4px 6px', whiteSpace: 'nowrap' },
+  headerTitle: { fontSize: 13, fontWeight: 700, letterSpacing: '2px', color: '#D4A843' },
+  headerRight: { display: 'flex', alignItems: 'center', gap: 6 },
+  iconBtn: { border: '1px solid #2A3A4A', background: '#1A2332', borderRadius: 6, padding: '5px 9px', cursor: 'pointer', fontSize: 14, fontFamily: 'inherit', color: '#E8E6E1' },
+  newBtn: { background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 11, padding: '6px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
+  scoreBadge: { fontSize: 11, fontWeight: 600, color: '#43A047', fontFamily: 'monospace' },
+  timerBadge: { fontSize: 11, fontWeight: 600, color: '#8899A6', fontFamily: 'monospace', background: '#1A2332', padding: '2px 8px', borderRadius: 4 },
+  diffPillSm: { fontSize: 10, fontWeight: 700, letterSpacing: '1px', border: '1px solid', borderRadius: 4, padding: '2px 7px' },
+
+  settingsPanel: { position: 'absolute', top: 52, right: 12, width: 256, maxHeight: '78vh', overflowY: 'auto', background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, padding: 14, zIndex: 30, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
+  settingLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#8899A6', fontWeight: 700, marginBottom: 8, marginTop: 4 },
+  diffMini: { display: 'flex', gap: 6, marginBottom: 14 },
+  diffMiniBtn: { flex: 1, border: '1px solid', borderRadius: 6, padding: '8px 0', cursor: 'pointer', fontFamily: 'inherit', fontWeight: 800, fontSize: 14 },
+  voiceSelect: { width: '100%', background: '#0F1419', border: '1px solid #2A3A4A', color: '#E8E6E1', borderRadius: 6, padding: '8px', fontSize: 12, fontFamily: 'inherit', marginBottom: 8 },
+  testVoiceBtn: { flex: 1, background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', borderRadius: 6, padding: '8px', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit' },
+  restartBtn: { width: '100%', background: '#D4A843', border: 'none', color: '#0F1419', borderRadius: 6, padding: '9px', fontSize: 12, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', marginTop: 10 },
+  calibTag: { color: '#43A047', fontWeight: 700, letterSpacing: '1px', marginLeft: 6, textTransform: 'none' },
+  calibBtn: { width: '100%', background: '#231A2E', border: '1px solid #5A3A6A', color: '#C8A8E0', borderRadius: 6, padding: '9px', fontSize: 12, fontWeight: 600, cursor: 'pointer', fontFamily: 'inherit', marginBottom: 8 },
+  calibReadout: { fontSize: 10, color: '#7A8A5A', marginBottom: 10 },
+  sliderRow: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 },
+  sliderLabel: { fontSize: 11, color: '#8899A6', width: 38, flexShrink: 0 },
+  slider: { flex: 1, accentColor: '#D4A843', height: 4 },
+  sliderVal: { fontSize: 11, color: '#E8E6E1', width: 30, textAlign: 'right', fontFamily: 'monospace' },
+  calibActions: { display: 'flex', gap: 8, marginTop: 4 },
+  calibResetBtn: { flex: 1, background: 'transparent', border: '1px solid #4A2A2A', color: '#C88', borderRadius: 6, padding: '8px', fontSize: 11, cursor: 'pointer', fontFamily: 'inherit' },
+
+  calibOverlay: { position: 'fixed', inset: 0, background: 'rgba(8,12,18,.82)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 20 },
+  calibModal: { width: '100%', maxWidth: 420, background: '#161E2B', border: '1px solid #5A3A6A', borderRadius: 14, padding: 22, boxShadow: '0 20px 60px rgba(0,0,0,.5)' },
+  calibModalHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16 },
+  calibModalTitle: { fontSize: 14, fontWeight: 800, letterSpacing: '2px', color: '#C8A8E0' },
+  calibIntro: { fontSize: 13, color: '#8899A6', marginBottom: 12, lineHeight: 1.5 },
+  calibPhrase: { fontSize: 18, lineHeight: 1.5, color: '#E8E6E1', fontWeight: 600, padding: '16px 18px', background: '#0F1419', border: '1px solid #2A3A4A', borderRadius: 10, marginBottom: 20 },
+  calibRecordBtn: { flex: 1, width: '100%', background: '#231A2E', border: '1px solid #5A3A6A', color: '#C8A8E0', borderRadius: 8, padding: '13px', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit' },
+  calibLive: { fontSize: 14, color: '#E8E6E1', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 8, justifyContent: 'center' },
+  calibLiveDot: { color: '#E53935', animation: 'pulse 1s infinite' },
+  calibDone: { fontSize: 14, color: '#43A047', fontWeight: 700, marginBottom: 14, textAlign: 'center' },
+  calibErr: { fontSize: 13, color: '#E0A8A8', marginBottom: 14, textAlign: 'center', lineHeight: 1.5 },
+  calibFinishBtn: { width: '100%', background: '#D4A843', border: 'none', color: '#0F1419', borderRadius: 8, padding: '12px', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', marginTop: 14 },
+
+  chatArea: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 8 },
+  msgRow: { display: 'flex', width: '100%' },
+  msgBubble: { maxWidth: '82%', padding: '12px 16px', borderRadius: 12, fontSize: 14, lineHeight: 1.6, position: 'relative' },
+  userBubble: { background: '#1A3A5C', color: '#E8E6E1', borderBottomRightRadius: 4 },
+  botBubble: { background: '#1A2332', color: '#C8C8C8', borderBottomLeftRadius: 4, border: '1px solid #2A3A4A' },
+  speakerLabel: { fontSize: 9, letterSpacing: '1.5px', color: '#D4A843', marginBottom: 4, fontWeight: 700 },
+  msgText: { whiteSpace: 'pre-wrap', wordBreak: 'break-word' },
+  replayBtn: { position: 'absolute', bottom: 4, right: 8, background: 'none', border: 'none', fontSize: 12, cursor: 'pointer', opacity: 0.4, padding: 2 },
+  typing: { display: 'flex', gap: 4, padding: '4px 0' },
+  dot: { fontSize: 8, color: '#8899A6', animation: 'pulse 1s infinite' },
+
+  // FIX #2: Prospect intro card
+  prospectCard: { background: '#1A2332', border: '1px solid #D4A843', borderRadius: 12, padding: '24px 20px', textAlign: 'center', margin: '40px auto 20px', maxWidth: 400 },
+  prospectName: { fontSize: 24, fontWeight: 800, color: '#D4A843', marginBottom: 6 },
+  prospectVibe: { fontSize: 13, color: '#8899A6', marginBottom: 16 },
+  prospectPrompt: { fontSize: 14, color: '#E8E6E1', fontWeight: 600 },
+  prospectTag: { fontSize: 10, color: '#8899A6', fontWeight: 400 },
+
+  // Debrief
+  debriefBtn: { marginLeft: 'auto', background: '#1A2A3A', border: '1px solid #3A5A7A', color: '#6FA8DC', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
+  debriefPanel: { background: '#161E2B', border: '1px solid #D4A843', borderRadius: 10, padding: 16, margin: '12px 0' },
+  debriefInHistory: { marginTop: 12, padding: '12px 0 0', borderTop: '1px solid #2A3A4A' },
+
+  hintCard: { margin: '0 16px 8px', background: '#1F2A1A', border: '1px solid #4A5A2A', borderRadius: 10, padding: '12px 14px', maxHeight: '32vh', overflowY: 'auto' },
+  hintHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
+  hintLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#A8C843', fontWeight: 700 },
+  hintClose: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 14 },
+  hintText: { fontSize: 14, lineHeight: 1.6, color: '#D8E0C8', whiteSpace: 'pre-wrap', cursor: 'text', userSelect: 'text' },
+  hintHeaderRight: { display: 'flex', alignItems: 'center', gap: 8 },
+  hintSendTop: { background: '#D4A843', color: '#0F1419', border: '1px solid #D4A843', fontSize: 12, fontWeight: 700, padding: '5px 12px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
+  hintTip: { fontSize: 11, color: '#7A8A5A', marginTop: 10, paddingTop: 10, borderTop: '1px solid #3A4A2A' },
+
+  speakingBar: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 12, padding: 8, background: '#1A2332', borderTop: '1px solid #2A3A4A' },
+  speakingPulse: { fontSize: 12, color: '#D4A843', animation: 'pulse 1.5s infinite' },
+  stopSpeakBtn: { background: '#2A3A4A', border: 'none', color: '#E8E6E1', fontSize: 11, padding: '4px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
+
+  actionBar: { padding: '0 16px 6px', display: 'flex', position: 'relative', alignItems: 'center' },
+  hintWrap: { position: 'relative' },
+  hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
+  hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
+  hintOption: { display: 'flex', flexDirection: 'column', gap: 2, width: '100%', textAlign: 'left', background: 'none', border: 'none', borderBottom: '1px solid #2A3A4A', color: '#E8E6E1', padding: '10px 14px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13 },
+  hintOptDesc: { fontSize: 11, color: '#8899A6' },
+
+  inputArea: { padding: '10px 16px', borderTop: '1px solid #1A2332', display: 'flex', gap: 8, background: '#0F1419', position: 'sticky', bottom: 0 },
+  callCircle: { width: 46, height: 46, borderRadius: '50%', border: '2px solid #2A5A3A', background: '#1A3A2A', color: '#7CDC9C', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 20, cursor: 'pointer', flexShrink: 0, alignSelf: 'flex-end' },
+  callPanel: { margin: '0 16px 8px' },
+  callPanelLive: { display: 'flex', alignItems: 'center', gap: 12, background: '#0F1A15', border: '1px solid #2A4A3A', borderRadius: 12, padding: '10px 12px' },
+  callMiniOrb: { width: 52, height: 52, borderRadius: '50%', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 24, border: '1px solid #2A4A3A', background: 'linear-gradient(145deg,#1A2A24,#0F1A15)', cursor: 'pointer', transition: 'all .3s' },
+  callPanelMid: { flex: 1, minWidth: 0 },
+  callPanelState: { fontSize: 12, fontWeight: 700, color: '#7CDC9C', letterSpacing: '.5px', marginBottom: 2 },
+  callPanelCaption: { fontSize: 12, color: '#A8B8A8', lineHeight: 1.45, maxHeight: 52, overflowY: 'auto' },
+  callEndInline: { flexShrink: 0, alignSelf: 'stretch', background: '#3A1A1A', border: '1px solid #5A2A2A', color: '#E0A8A8', fontSize: 12, fontWeight: 700, padding: '0 16px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
+  callPanelErr: { background: '#1A1414', border: '1px solid #5A2A2A', borderRadius: 12, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8 },
+  callPanelErrHead: { display: 'flex', justifyContent: 'space-between', alignItems: 'center' },
+  callPanelErrTitle: { fontSize: 13, fontWeight: 800, color: '#E0A8A8' },
+  callPanelX: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 14 },
+  callPanelErrMsg: { fontSize: 13, color: '#C8C8C8', lineHeight: 1.55 },
+  callOrbListening: { animation: 'orbBreathe 2s ease-in-out infinite', borderColor: '#43A047', background: 'linear-gradient(145deg,#1A3A24,#0F2A15)' },
+  callOrbThinking: { borderColor: '#D4A843', background: 'linear-gradient(145deg,#2A2418,#1A1810)' },
+  callOrbSpeaking: { animation: 'orbSpeak 1.6s ease-in-out infinite', borderColor: '#D4A843', background: 'linear-gradient(145deg,#2A2418,#1A1810)' },
+  callRetryBtn: { background: '#1A3A2A', border: '1px solid #2A5A3A', color: '#7CDC9C', fontSize: 13, fontWeight: 700, padding: '11px 18px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit' },
+  callCloseBtn: { background: 'transparent', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 13, fontWeight: 600, padding: '11px 18px', borderRadius: 10, cursor: 'pointer', fontFamily: 'inherit' },
+  input: { flex: 1, background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: 12, color: '#E8E6E1', fontSize: 14, fontFamily: 'inherit', resize: 'none', outline: 'none', lineHeight: 1.5 },
+  sendBtn: { background: '#D4A843', border: 'none', borderRadius: 8, color: '#0F1419', fontWeight: 700, fontSize: 13, padding: '0 20px', cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', alignSelf: 'flex-end', height: 42 },
+
+  historyScroll: { flex: 1, overflowY: 'auto', padding: 16 },
+  empty: { textAlign: 'center', color: '#8899A6', fontSize: 14, lineHeight: 1.6, marginTop: 60, padding: '0 24px' },
+  patternBtn: { width: '100%', background: '#1A2332', border: '1px solid #D4A843', color: '#D4A843', fontSize: 13, fontWeight: 700, padding: '12px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', marginBottom: 14 },
+  patternPanel: { marginBottom: 20 },
+  statBlock: { background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 10, padding: 16, marginBottom: 12 },
+  statHeaderRow: { display: 'flex', alignItems: 'center', gap: 16, marginBottom: 16 },
+  statBig: { fontSize: 40, fontWeight: 800, color: '#43A047', lineHeight: 1 },
+  statBigUnit: { fontSize: 16, color: '#8899A6', fontWeight: 400 },
+  statMeta: { fontSize: 13, color: '#C8C8C8' },
+  statSub: { fontSize: 11, color: '#8899A6', marginTop: 2 },
+  barRow: { display: 'flex', alignItems: 'center', gap: 10, marginBottom: 8 },
+  barLabel: { fontSize: 12, color: '#8899A6', width: 130, flexShrink: 0 },
+  barTrack: { flex: 1, height: 8, background: '#0F1419', borderRadius: 4, overflow: 'hidden' },
+  barFill: { height: '100%', borderRadius: 4, transition: 'width .4s' },
+  barVal: { fontSize: 12, color: '#E8E6E1', width: 28, textAlign: 'right', fontFamily: 'monospace' },
+  weakCallout: { marginTop: 12, padding: '8px 12px', background: '#2A1A1A', border: '1px solid #4A2A2A', borderRadius: 6, fontSize: 12, color: '#E0A8A8' },
+  coachBlock: { background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 10, padding: 16 },
+  coachLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#D4A843', fontWeight: 700, marginBottom: 8 },
+  coachText: { fontSize: 14, lineHeight: 1.7, color: '#C8C8C8', whiteSpace: 'pre-wrap' },
+
+  sessionList: { display: 'flex', flexDirection: 'column', gap: 8 },
+  sessionCard: { background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden' },
+  sessionTop: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '12px 14px', cursor: 'pointer', flexWrap: 'wrap', gap: 6 },
+  sessionLeft: { display: 'flex', alignItems: 'center', gap: 8 },
+  modePill: { fontSize: 9, fontWeight: 700, letterSpacing: '1px', color: '#C8C8C8', padding: '3px 8px', borderRadius: 4 },
+  sessionRight: { display: 'flex', alignItems: 'center', gap: 10 },
+  sessionScore: { fontSize: 14, fontWeight: 700, color: '#43A047', fontFamily: 'monospace' },
+  sessionScoreMuted: { fontSize: 12, color: '#8899A6' },
+  sessionDate: { fontSize: 11, color: '#5A6A7A' },
+  delBtn: { background: 'none', border: 'none', color: '#5A6A7A', cursor: 'pointer', fontSize: 13, padding: 2 },
+  transcript: { borderTop: '1px solid #2A3A4A', padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 8, maxHeight: 280, overflowY: 'auto' },
+  tLine: { display: 'flex', gap: 8, fontSize: 13, lineHeight: 1.5 },
+  tWho: { fontSize: 9, fontWeight: 700, letterSpacing: '1px', flexShrink: 0, width: 56, paddingTop: 2 },
+  tText: { color: '#C8C8C8', whiteSpace: 'pre-wrap' },
+};
