@@ -548,8 +548,13 @@ function Trainer({ user }) {
     const transcript = messagesRef.current
       .map((m) => `${m.role === 'user' ? 'REP' : (mode === 'roleplay' ? 'PROSPECT' : 'DRILL')}: ${m.content}`).join('\n\n');
     const sys = type === 'strategy' ? HINT_STRATEGY : HINT_WORDS;
-    const reply = await callAPI([{ role: 'user', content: `Transcript so far:\n\n${transcript || '(conversation just started)'}\n\nGive me the hint.` }], sys);
-    setHintText(reply); setHintLoading(false);
+    try {
+      const reply = await callAPI([{ role: 'user', content: `Transcript so far:\n\n${transcript || '(conversation just started)'}\n\nGive me the hint.` }], sys);
+      setHintText(reply || 'No hint available. Try again.');
+    } catch (e) {
+      setHintText('Hint failed. Try again.');
+    }
+    setHintLoading(false);
   }, [mode]);
 
   const insertSelection = useCallback(() => {
@@ -1187,8 +1192,8 @@ const S = {
   speakingPulse: { fontSize: 12, color: '#D4A843', animation: 'pulse 1.5s infinite' },
   stopSpeakBtn: { background: '#2A3A4A', border: 'none', color: '#E8E6E1', fontSize: 11, padding: '4px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
 
-  actionBar: { padding: '0 16px 6px', display: 'flex', position: 'relative', alignItems: 'center' },
-  hintWrap: { position: 'relative' },
+  actionBar: { padding: '0 16px 6px', display: 'flex', position: 'relative', alignItems: 'center', zIndex: 20 },
+  hintWrap: { position: 'relative', zIndex: 20 },
   hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
   hintOption: { display: 'flex', flexDirection: 'column', gap: 2, width: '100%', textAlign: 'left', background: 'none', border: 'none', borderBottom: '1px solid #2A3A4A', color: '#E8E6E1', padding: '10px 14px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 13 },

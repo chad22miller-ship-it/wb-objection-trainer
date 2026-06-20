@@ -18,22 +18,26 @@ Do NOT move on until Node.js is confirmed working.
 
 Run `npm install` automatically. Don't ask, just do it. If it fails, troubleshoot.
 
-### Step 3: Get a Gemini API key
+### Step 3: Get Gemini API keys
 
 Open the browser for them automatically by running: `start https://aistudio.google.com/apikey` (Windows) or `open https://aistudio.google.com/apikey` (Mac).
 
 Then tell them:
 
-> A page just opened in your browser. Click "Create API Key", then copy the key and paste it here.
+> A page just opened in your browser.
+> 1. Click "Create API Key" — pick any project (or let it create one). Copy the key and paste it here.
+> 2. Now click "Create API Key" again and pick "Create API key in new project". Copy that second key and paste it here too.
+>
+> Two keys = double the free AI capacity. Each key gets its own limit, and the app rotates between them automatically.
 
-That's it — one click, one paste. Don't question the format — Gemini keys can start with `AIza` or `AQ.` or other prefixes. Save whatever they paste.
+Don't question the format — Gemini keys can start with `AIza` or `AQ.` or other prefixes. Save whatever they paste.
 
 ### Step 4: Create .env (silent)
 
-Create the `.env` file automatically using the Gemini key they just pasted plus the pre-configured Supabase credentials:
+Create the `.env` file automatically using the Gemini keys they just pasted (comma-separated) plus the pre-configured Supabase credentials:
 
 ```
-GEMINI_API_KEY=<whatever they pasted>
+GEMINI_API_KEY=<key1>,<key2>
 VITE_SUPABASE_URL=https://vhbdiaazslhezaugmrqd.supabase.co
 VITE_SUPABASE_ANON_KEY=sb_publishable_-x9TwWqvgCztnABDnmRKpA_VwndPN6W
 ```

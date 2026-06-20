@@ -1,7 +1,7 @@
 // All Anthropic API calls go through /api/chat (the Vercel serverless function).
 // The API key never touches the browser.
 
-export async function callAPI(msgs, system, { timeoutMs = 60000 } = {}) {
+export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
 
@@ -21,6 +21,7 @@ export async function callAPI(msgs, system, { timeoutMs = 60000 } = {}) {
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       console.error('API error:', res.status, err);
+      if (res.status === 429) return '⚠️ AI is rate-limited (too many requests). Wait 30 seconds and try again.';
       return 'Connection error. Try again.';
     }
 

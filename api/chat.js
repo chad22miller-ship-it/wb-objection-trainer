@@ -1,19 +1,72 @@
-// Vercel serverless function — calls Google Gemini and returns a response
-// shaped like Anthropic's so the frontend (src/lib/api.js) needs no changes.
-// The API key never touches the browser.
-//
-// To switch back to Anthropic Claude: see api/chat-anthropic.js for the original.
+// Vercel serverless function — calls Google Gemini with automatic retry,
+// multi-key rotation, and optional Anthropic fallback.
+// Supports multiple Gemini keys via comma-separated GEMINI_API_KEY env var.
 
 const GEMINI_MODEL = 'gemini-2.5-flash';
+
+async function callGemini(apiKey, body) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 25000);
+  try {
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    const data = await res.json();
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    clearTimeout(timer);
+    return { ok: false, status: err.name === 'AbortError' ? 408 : 500, data: { error: { message: err.message } } };
+  }
+}
+
+async function callAnthropic(apiKey, system, messages, max_tokens) {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), 50000);
+  try {
+    const res = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens,
+        system: system || '',
+        messages: messages || [],
+      }),
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    const data = await res.json();
+    return { ok: res.ok, status: res.status, data };
+  } catch (err) {
+    clearTimeout(timer);
+    return { ok: false, status: 500, data: { error: { message: err.message } } };
+  }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// Round-robin counter — persists across requests in the same serverless instance
+let keyIndex = 0;
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ error: 'GEMINI_API_KEY not configured on server' });
+  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+
+  if (!geminiKeys.length && !anthropicKey) {
+    return res.status(500).json({ error: 'No API keys configured' });
   }
 
   try {
@@ -24,47 +77,62 @@ export default async function handler(req, res) {
       parts: [{ text: typeof m.content === 'string' ? m.content : '' }],
     }));
 
-    const body = {
+    const geminiBody = {
       contents,
       generationConfig: {
         maxOutputTokens: max_tokens,
-        // gemini-2.5-flash is a "thinking" model — without this, thinking tokens
-        // eat the maxOutputTokens budget and long replies (debrief, drill grading,
-        // pattern analysis) come back truncated or empty. 0 disables thinking.
         thinkingConfig: { thinkingBudget: 0 },
       },
     };
     if (system) {
-      body.systemInstruction = { parts: [{ text: system }] };
+      geminiBody.systemInstruction = { parts: [{ text: system }] };
     }
 
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`;
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), 50000);
-    const response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-      signal: ac.signal,
-    });
-    clearTimeout(timer);
+    // Try each Gemini key, rotating start position
+    if (geminiKeys.length) {
+      const startIdx = keyIndex;
+      for (let i = 0; i < geminiKeys.length; i++) {
+        const idx = (startIdx + i) % geminiKeys.length;
+        const key = geminiKeys[idx];
 
-    const data = await response.json();
+        // Try this key with one retry after a delay
+        for (let attempt = 0; attempt < 2; attempt++) {
+          const result = await callGemini(key, geminiBody);
 
-    if (!response.ok) {
-      return res.status(response.status).json({ error: data.error?.message || 'Gemini API error' });
+          if (result.ok) {
+            keyIndex = (idx + 1) % geminiKeys.length;
+            const text = result.data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+            return res.status(200).json({ content: [{ type: 'text', text }] });
+          }
+
+          if (result.status === 429 && attempt === 0) {
+            await sleep(3000);
+            continue;
+          }
+          break;
+        }
+      }
+      // All keys exhausted — try one more time with a longer wait
+      await sleep(10000);
+      const lastKey = geminiKeys[keyIndex % geminiKeys.length];
+      const lastTry = await callGemini(lastKey, geminiBody);
+      if (lastTry.ok) {
+        keyIndex = (keyIndex + 1) % geminiKeys.length;
+        const text = lastTry.data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+        return res.status(200).json({ content: [{ type: 'text', text }] });
+      }
     }
 
-    const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+    // Fallback to Anthropic
+    if (anthropicKey) {
+      const result = await callAnthropic(anthropicKey, system, messages, max_tokens);
+      if (result.ok) return res.status(200).json(result.data);
+      return res.status(result.status).json({ error: result.data.error?.message || 'Anthropic API error' });
+    }
 
-    return res.status(200).json({
-      content: [{ type: 'text', text }],
-    });
+    return res.status(429).json({ error: 'AI is busy. Wait a moment and try again.' });
   } catch (err) {
     console.error('API proxy error:', err);
-    if (err.name === 'AbortError') {
-      return res.status(504).json({ error: 'Gemini took too long. Try again.' });
-    }
-    return res.status(500).json({ error: 'Server error calling Gemini' });
+    return res.status(500).json({ error: 'Server error' });
   }
 }
