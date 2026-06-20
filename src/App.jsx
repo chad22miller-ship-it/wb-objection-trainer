@@ -96,6 +96,8 @@ function Trainer({ user }) {
   const [debriefScores, setDebriefScores] = useState(null);
   const [debriefLoading, setDebriefLoading] = useState(false);
   const [showDebrief, setShowDebrief] = useState(false);
+  const [whyProgress, setWhyProgress] = useState(0);
+  const [showCongrats, setShowCongrats] = useState(false);
 
   const [history, setHistory] = useState([]);
   const [expanded, setExpanded] = useState(null);
@@ -449,7 +451,7 @@ function Trainer({ user }) {
     setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
     setMessages([]); setRounds([]); setInput('');
     setHintOpen(false); setHintMenu(false); setHintText(''); setSettingsOpen(false);
-    setShowDebrief(false); setDebriefText(''); setDebriefScores(null);
+    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false);
     setLoading(true); startTimer();
 
     if (m === 'roleplay') {
@@ -465,6 +467,14 @@ function Trainer({ user }) {
     }
   }, [buildSystem, saveSession, speak, stopSpeaking, startTimer, stopTimer]);
 
+  /* ---------- WHY progress parsing ---------- */
+  const stripWhyTag = useCallback((text) => {
+    const m = text.match(/\[WHY_PROGRESS:(\d+)\]/);
+    const score = m ? parseInt(m[1], 10) : null;
+    const clean = text.replace(/\s*\[WHY_PROGRESS:\d+\]\s*/g, '').trim();
+    return { clean, score };
+  }, []);
+
   /* ---------- send (ref-based for call mode) ---------- */
   const sendTextFromRef = useCallback(async (text) => {
     const t = (text || '').trim();
@@ -476,10 +486,20 @@ function Trainer({ user }) {
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
-    const reply = await callAPI(
+    let reply = await callAPI(
       newMsgs.map((m) => ({ role: m.role, content: m.content })),
       buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current)
     );
+
+    if (modeRef.current === 'roleplay') {
+      const { clean, score } = stripWhyTag(reply);
+      reply = clean;
+      if (score != null) {
+        setWhyProgress(score);
+        if (score >= 8 && !showCongrats) setShowCongrats(true);
+      }
+    }
+
     const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
     setMessages(finalMsgs);
 
@@ -491,7 +511,7 @@ function Trainer({ user }) {
     await saveSession(finalMsgs, nextRounds);
     setLoading(false);
     return reply;
-  }, [buildSystem, saveSession, stopSpeaking]);
+  }, [buildSystem, saveSession, stopSpeaking, stripWhyTag, showCongrats]);
 
   const sendMessage = useCallback(async () => {
     const t = input.trim();
@@ -873,6 +893,46 @@ function Trainer({ user }) {
         </div>
       )}
 
+      {/* WHY Progress Bar — roleplay only */}
+      {mode === 'roleplay' && messages.length > 0 && (
+        <div style={S.whyBarWrap}>
+          <div style={S.whyBarHeader}>
+            <span style={S.whyBarLabel}>GETTING THE WHY</span>
+            <span style={S.whyBarPct}>{whyProgress * 10}%</span>
+          </div>
+          <div style={S.whyBarTrack}>
+            <div style={{
+              ...S.whyBarFill,
+              width: `${whyProgress * 10}%`,
+              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
+            }} />
+          </div>
+          <div style={S.whyBarHint}>
+            {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
+            {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
+            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
+            {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
+            {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
+            {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
+          </div>
+        </div>
+      )}
+
+      {/* Congrats overlay */}
+      {showCongrats && (
+        <div style={S.congratsOverlay} onClick={() => setShowCongrats(false)}>
+          <div style={S.congratsModal} onClick={(e) => e.stopPropagation()}>
+            <div style={S.congratsEmoji}>🔥</div>
+            <div style={S.congratsTitle}>YOU GOT THE WHY</div>
+            <div style={S.congratsBody}>
+              They said it out loud. They feel the gap between where they are and where they want to be.
+              Now bridge into the New Art of Living — Freedom, Security, Peace. You've earned this moment.
+            </div>
+            <button style={S.congratsBtn} onClick={() => setShowCongrats(false)}>Keep Going</button>
+          </div>
+        </div>
+      )}
+
       <div style={S.chatArea} onClick={() => settingsOpen && setSettingsOpen(false)}>
         {/* FIX #2: Roleplay shows prospect info and prompts rep to open */}
         {mode === 'roleplay' && noMessages && !loading && (
@@ -1190,4 +1250,21 @@ const S = {
   tLine: { display: 'flex', gap: 8, fontSize: 13, lineHeight: 1.5 },
   tWho: { fontSize: 9, fontWeight: 700, letterSpacing: '1px', flexShrink: 0, width: 56, paddingTop: 2 },
   tText: { color: '#C8C8C8', whiteSpace: 'pre-wrap' },
+
+  // WHY Progress Bar
+  whyBarWrap: { padding: '8px 16px 4px', background: '#0F1419', borderBottom: '1px solid #1A2332' },
+  whyBarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  whyBarLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#D4A843', fontWeight: 700 },
+  whyBarPct: { fontSize: 12, color: '#E8E6E1', fontWeight: 700, fontFamily: 'monospace' },
+  whyBarTrack: { height: 10, background: '#1A2332', borderRadius: 5, overflow: 'hidden' },
+  whyBarFill: { height: '100%', borderRadius: 5, transition: 'width .6s ease, background .6s ease' },
+  whyBarHint: { fontSize: 11, color: '#8899A6', marginTop: 4, fontStyle: 'italic' },
+
+  // Congrats overlay
+  congratsOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
+  congratsModal: { background: '#161E2B', border: '2px solid #D4A843', borderRadius: 16, padding: '32px 28px', textAlign: 'center', maxWidth: 400, width: '90%', boxShadow: '0 0 60px rgba(212,168,67,.3)' },
+  congratsEmoji: { fontSize: 56, marginBottom: 12 },
+  congratsTitle: { fontSize: 24, fontWeight: 900, color: '#D4A843', letterSpacing: '2px', marginBottom: 12 },
+  congratsBody: { fontSize: 15, lineHeight: 1.7, color: '#C8C8C8', marginBottom: 20 },
+  congratsBtn: { background: '#D4A843', border: 'none', color: '#0F1419', fontSize: 14, fontWeight: 800, padding: '12px 32px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
 };
