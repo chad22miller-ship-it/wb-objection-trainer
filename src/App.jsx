@@ -966,7 +966,7 @@ function Trainer({ user }) {
             <div style={{ ...S.msgBubble, ...(m.role === 'user' ? S.userBubble : S.botBubble) }}>
               {m.role === 'assistant' && (
                 <div style={S.speakerLabel}>
-                  {mode === 'roleplay' ? prospect.name.toUpperCase() : 'DRILL SGT'}
+                  {mode === 'roleplay' ? prospect.name.toUpperCase() : 'PROSPECT'}
                 </div>
               )}
               <div style={S.msgText}>{m.content}</div>
