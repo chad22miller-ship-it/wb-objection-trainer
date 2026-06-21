@@ -838,13 +838,18 @@ function Trainer({ user }) {
           <button style={S.iconBtn} onClick={() => setSettingsOpen((o) => !o)} title="Settings">⚙</button>
         </div>
 
-        {/* AI status — honest per-instance health signal */}
+        {/* AI status — simple overload traffic light (per-instance) */}
         {apiUsage && apiUsage.health && (
           <div style={S.usageBar}>
             <div style={S.usageTop}>
               <span style={S.usageLabel}>AI STATUS</span>
-              <span style={{ ...S.usagePct, color: apiUsage.health === 'ok' ? '#43A047' : '#D4A843' }}>
-                {apiUsage.health === 'ok' ? '🟢 Ready' : '🟡 Busy — rotating keys'}
+              <span style={{
+                ...S.usagePct,
+                color: apiUsage.health === 'ok' ? '#43A047' : apiUsage.health === 'busy' ? '#D4A843' : '#E53935',
+              }}>
+                {apiUsage.health === 'ok' ? '🟢 Healthy'
+                  : apiUsage.health === 'busy' ? '🟡 Busy — using backups'
+                  : '🔴 Overloaded — add keys'}
               </span>
             </div>
           </div>

@@ -129,16 +129,42 @@ const startedAt = Date.now();
 function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
 function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
 
-// Honest, per-instance health signal. Vercel runs many isolated serverless
-// instances that don't share memory, so a true fleet-wide usage total isn't
-// available here. We report whether THIS instance is currently throttling a key
-// (any active cooldown) rather than a misleading global percentage.
+// Honest, per-instance overload signal. Vercel runs many isolated serverless
+// instances that don't share memory, so an exact fleet-wide quota total isn't
+// available here. Instead we report a simple traffic-light health based on how
+// many keys are currently rate-limited (cooling down):
+//   ok        = nothing rate-limited, all keys responding
+//   busy      = some keys rate-limited, but a backup still has capacity
+//   overloaded = no provider has a free key right now (users may see delays)
 export function getUsageStats() {
   const now = Date.now();
-  const anyCooling = [...cooldowns.values()].some((t) => t > now);
+  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const groqKeys = (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+
+  const coolingCount = (prefix, n) => {
+    let c = 0;
+    for (let i = 0; i < n; i++) if ((cooldowns.get(`${prefix}:${i}`) || 0) > now) c++;
+    return c;
+  };
+  const gCool = coolingCount('gemini', geminiKeys.length);
+  const qCool = coolingCount('groq', groqKeys.length);
+  const orCool = (cooldowns.get('openrouter:0') || 0) > now;
+  const anCool = (cooldowns.get('anthropic:0') || 0) > now;
+
+  const geminiFree = geminiKeys.length > 0 && gCool < geminiKeys.length;
+  const groqFree = groqKeys.length > 0 && qCool < groqKeys.length;
+  const orFree = !!process.env.OPENROUTER_API_KEY && !orCool;
+  const anFree = !!process.env.ANTHROPIC_API_KEY && !anCool;
+
+  const anythingFree = geminiFree || groqFree || orFree || anFree;
+  const anyCooling = gCool + qCool + (orCool ? 1 : 0) + (anCool ? 1 : 0) > 0;
+  const health = !anythingFree ? 'overloaded' : anyCooling ? 'busy' : 'ok';
+
   return {
     scope: 'instance',
-    health: anyCooling ? 'throttled' : 'ok',
+    health,
+    gemini: { cooling: gCool, total: geminiKeys.length },
+    groq: { cooling: qCool, total: groqKeys.length },
     sinceMins: Math.round((now - startedAt) / 60000),
   };
 }
