@@ -18,10 +18,12 @@ if (fs.existsSync(envPath)) {
 
 const { default: chatHandler } = await import('./api/chat.js');
 const { default: adminHandler } = await import('./api/admin.js');
+const { default: statsHandler } = await import('./api/stats.js');
 
 const handlers = {
   '/api/chat': chatHandler,
   '/api/admin': adminHandler,
+  '/api/stats': statsHandler,
 };
 
 const PORT = 3001;

@@ -98,6 +98,10 @@ function Trainer({ user }) {
   const [showDebrief, setShowDebrief] = useState(false);
   const [whyProgress, setWhyProgress] = useState(0);
   const [showCongrats, setShowCongrats] = useState(false);
+  const [drillProgress, setDrillProgress] = useState(0);
+
+  // API usage stats
+  const [apiUsage, setApiUsage] = useState(null);
 
   const [history, setHistory] = useState([]);
   const [expanded, setExpanded] = useState(null);
@@ -162,7 +166,15 @@ function Trainer({ user }) {
     };
   }, []);
 
-  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, hintText]);
+  useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, hintText, debriefText, showDebrief, hintOpen]);
+
+  // Poll API usage stats
+  useEffect(() => {
+    const fetchStats = () => fetch('/api/stats').then((r) => r.json()).then(setApiUsage).catch(() => {});
+    fetchStats();
+    const iv = setInterval(fetchStats, 30000);
+    return () => clearInterval(iv);
+  }, []);
 
   const pickVoice = useCallback(() => {
     const vs = voicesRef.current;
@@ -451,7 +463,7 @@ function Trainer({ user }) {
     setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
     setMessages([]); setRounds([]); setInput('');
     setHintOpen(false); setHintMenu(false); setHintText(''); setSettingsOpen(false);
-    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false);
+    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false); setDrillProgress(0);
     setLoading(true); startTimer();
 
     if (m === 'roleplay') {
@@ -468,11 +480,13 @@ function Trainer({ user }) {
   }, [buildSystem, saveSession, speak, stopSpeaking, startTimer, stopTimer]);
 
   /* ---------- WHY progress parsing ---------- */
-  const stripWhyTag = useCallback((text) => {
-    const m = text.match(/\[WHY_PROGRESS:(\d+)\]/);
-    const score = m ? parseInt(m[1], 10) : null;
-    const clean = text.replace(/\s*\[WHY_PROGRESS:\d+\]\s*/g, '').trim();
-    return { clean, score };
+  const stripProgressTags = useCallback((text) => {
+    const whyMatch = text.match(/\[WHY_PROGRESS:(\d+)\]/);
+    const drillMatch = text.match(/\[DRILL_PROGRESS:(\d+)\]/);
+    const whyScore = whyMatch ? parseInt(whyMatch[1], 10) : null;
+    const drillScore = drillMatch ? parseInt(drillMatch[1], 10) : null;
+    const clean = text.replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS):\d+\]\s*/g, '').trim();
+    return { clean, whyScore, drillScore };
   }, []);
 
   /* ---------- send (ref-based for call mode) ---------- */
@@ -491,13 +505,14 @@ function Trainer({ user }) {
       buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current)
     );
 
-    if (modeRef.current === 'roleplay') {
-      const { clean, score } = stripWhyTag(reply);
-      reply = clean;
-      if (score != null) {
-        setWhyProgress(score);
-        if (score >= 8 && !showCongrats) setShowCongrats(true);
-      }
+    const { clean, whyScore, drillScore } = stripProgressTags(reply);
+    reply = clean;
+    if (modeRef.current === 'roleplay' && whyScore != null) {
+      setWhyProgress(whyScore);
+      if (whyScore >= 8 && !showCongrats) setShowCongrats(true);
+    }
+    if (modeRef.current === 'drill' && drillScore != null) {
+      setDrillProgress(drillScore);
     }
 
     const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
@@ -511,7 +526,7 @@ function Trainer({ user }) {
     await saveSession(finalMsgs, nextRounds);
     setLoading(false);
     return reply;
-  }, [buildSystem, saveSession, stopSpeaking, stripWhyTag, showCongrats]);
+  }, [buildSystem, saveSession, stopSpeaking, stripProgressTags, showCongrats]);
 
   const sendMessage = useCallback(async () => {
     const t = input.trim();
@@ -823,6 +838,29 @@ function Trainer({ user }) {
           <button style={S.iconBtn} onClick={() => setSettingsOpen((o) => !o)} title="Settings">⚙</button>
         </div>
 
+        {/* API Usage Bar */}
+        {apiUsage && (
+          <div style={S.usageBar}>
+            <div style={S.usageTop}>
+              <span style={S.usageLabel}>API USAGE</span>
+              <span style={S.usagePct}>{apiUsage.pct}%</span>
+              <span style={S.usageDetail}>{apiUsage.totalUsed}/{apiUsage.totalMax}</span>
+              {apiUsage.minsLeft != null && (
+                <span style={S.usageTimer}>
+                  {apiUsage.minsLeft >= 60 ? `~${Math.round(apiUsage.minsLeft / 60)}h left` : `~${apiUsage.minsLeft}m left`}
+                </span>
+              )}
+            </div>
+            <div style={S.usageTrack}>
+              <div style={{
+                ...S.usageFill,
+                width: `${Math.min(apiUsage.pct, 100)}%`,
+                background: apiUsage.pct >= 90 ? '#E53935' : apiUsage.pct >= 60 ? '#D4A843' : '#43A047',
+              }} />
+            </div>
+          </div>
+        )}
+
         {settingsOpen && (
           <div style={S.settingsPanel}>
             <div style={S.settingLabel}>DIFFICULTY</div>
@@ -898,31 +936,6 @@ function Trainer({ user }) {
         </div>
       )}
 
-      {/* WHY Progress Bar — roleplay only */}
-      {mode === 'roleplay' && messages.length > 0 && (
-        <div style={S.whyBarWrap}>
-          <div style={S.whyBarHeader}>
-            <span style={S.whyBarLabel}>GETTING THE WHY</span>
-            <span style={S.whyBarPct}>{whyProgress * 10}%</span>
-          </div>
-          <div style={S.whyBarTrack}>
-            <div style={{
-              ...S.whyBarFill,
-              width: `${whyProgress * 10}%`,
-              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
-            }} />
-          </div>
-          <div style={S.whyBarHint}>
-            {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
-            {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
-            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
-            {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
-            {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
-            {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
-          </div>
-        </div>
-      )}
-
       {/* Congrats overlay */}
       {showCongrats && (
         <div style={S.congratsOverlay} onClick={() => setShowCongrats(false)}>
@@ -971,19 +984,22 @@ function Trainer({ user }) {
           </div>
         )}
 
-        {/* Roleplay debrief */}
-        {showDebrief && (
-          <div style={S.debriefPanel}>
-            <div style={S.coachLabel}>📋 SESSION DEBRIEF</div>
-            {debriefLoading
-              ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
-              : <div style={S.coachText}>{debriefText}</div>
-            }
-          </div>
-        )}
-
         <div ref={chatEndRef} />
       </div>
+
+      {/* Roleplay debrief — outside chatArea so it's always visible */}
+      {showDebrief && (
+        <div style={S.debriefPanel}>
+          <div style={S.debriefHeader}>
+            <div style={S.coachLabel}>📋 SESSION DEBRIEF</div>
+            <button style={S.hintClose} onClick={() => setShowDebrief(false)}>✕</button>
+          </div>
+          {debriefLoading
+            ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+            : <div style={S.coachText}>{debriefText}</div>
+          }
+        </div>
+      )}
 
       {hintOpen && (
         <div style={S.hintCard}>
@@ -1049,7 +1065,7 @@ function Trainer({ user }) {
                 </div>
                 <div style={S.callPanelCaption}>
                   {callState === 'listening' && (liveTranscript || '…')}
-                  {callState === 'speaking' && (() => { const lb = [...messages].reverse().find((m) => m.role === 'assistant'); return lb ? lb.content : ''; })()}
+                  {callState === 'speaking' && ''}
                   {callState === 'connecting' && 'Allow the mic if your browser asks.'}
                 </div>
               </div>
@@ -1078,13 +1094,87 @@ function Trainer({ user }) {
         )}
       </div>
 
-      <div style={S.inputArea}>
-        <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
-        <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
-          placeholder={noMessages && mode === 'roleplay' ? "Open the call — what do you say?" : "Type your reply, or tap 📞 for a live call…"}
-          style={S.input} rows={2} disabled={loading} />
-        <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
-      </div>
+      {/* WHY Progress Bar — replaces input in roleplay after first message */}
+      {mode === 'roleplay' && messages.length > 0 ? (
+        <div style={S.whyBarBottom}>
+          <div style={S.whyBarHeader}>
+            <span style={S.whyBarLabel}>GETTING THE WHY</span>
+            <span style={S.whyBarPct}>{whyProgress * 10}%</span>
+          </div>
+          <div style={S.whyBarTrack}>
+            <div style={{
+              ...S.whyBarFill,
+              width: `${whyProgress * 10}%`,
+              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
+            }} />
+          </div>
+          <div style={S.whyBarHint}>
+            {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
+            {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
+            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
+            {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
+            {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
+            {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
+          </div>
+        </div>
+
+      /* Drill Progress Bar — replaces input in gauntlet after first response */
+      ) : mode === 'drill' && messages.length > 1 ? (
+        <div style={S.drillBarBottom}>
+          <div style={S.drillBarHeader}>
+            <span style={S.drillBarLabel}>
+              {drillProgress <= 4 ? '🔴 OVERCOME THE OBJECTION' : drillProgress <= 6 ? '🟡 GET BACK TO THE WHY' : drillProgress <= 8 ? '🟢 BRIDGE TO NAOL' : '✅ COMPLETE'}
+            </span>
+            <span style={S.drillBarPct}>{drillProgress * 10}%</span>
+          </div>
+          <div style={S.drillBarTrack}>
+            <div style={{
+              ...S.drillBarFill,
+              width: `${drillProgress * 10}%`,
+            }} />
+          </div>
+          <div style={S.drillBarPhases}>
+            <div style={{ ...S.drillPhase, opacity: drillProgress >= 1 ? 1 : 0.3 }}>
+              <div style={{ ...S.drillPhaseDot, background: drillProgress <= 4 ? '#E53935' : drillProgress <= 6 ? '#D4A843' : '#43A047' }} />
+              <span>Handle Objection</span>
+            </div>
+            <div style={{ ...S.drillPhaseArrow }}>→</div>
+            <div style={{ ...S.drillPhase, opacity: drillProgress >= 5 ? 1 : 0.3 }}>
+              <div style={{ ...S.drillPhaseDot, background: drillProgress >= 7 ? '#43A047' : drillProgress >= 5 ? '#D4A843' : '#5A6A7A' }} />
+              <span>Get the WHY</span>
+            </div>
+            <div style={{ ...S.drillPhaseArrow }}>→</div>
+            <div style={{ ...S.drillPhase, opacity: drillProgress >= 8 ? 1 : 0.3 }}>
+              <div style={{ ...S.drillPhaseDot, background: drillProgress >= 9 ? '#43A047' : '#5A6A7A' }} />
+              <span>New Art of Living</span>
+            </div>
+          </div>
+          <div style={S.drillBarHint}>
+            {drillProgress <= 2 && 'Use the right tool — Pullback, Must Conversion, or Pain Bridge.'}
+            {drillProgress > 2 && drillProgress <= 4 && 'Ask, don\'t tell. Use silence after your question.'}
+            {drillProgress > 4 && drillProgress <= 6 && 'Objection handled — now get back to their WHY. Who are they doing this for?'}
+            {drillProgress > 6 && drillProgress <= 8 && 'You have the WHY — bridge into Freedom, Security, Peace.'}
+            {drillProgress > 8 && drillProgress < 10 && 'Almost perfect — lock the next step.'}
+            {drillProgress >= 10 && 'Perfect execution. Ready for the next round.'}
+          </div>
+          <div style={S.drillInputRow}>
+            <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
+            <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+              placeholder="Handle the objection…"
+              style={S.input} rows={1} disabled={loading} />
+            <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
+          </div>
+        </div>
+
+      ) : (
+        <div style={S.inputArea}>
+          <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
+          <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+            placeholder={noMessages && mode === 'roleplay' ? "Open the call — what do you say?" : "Type your reply, or tap 📞 for a live call…"}
+            style={S.input} rows={2} disabled={loading} />
+          <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -1156,7 +1246,7 @@ const S = {
   calibErr: { fontSize: 13, color: '#E0A8A8', marginBottom: 14, textAlign: 'center', lineHeight: 1.5 },
   calibFinishBtn: { width: '100%', background: '#D4A843', border: 'none', color: '#0F1419', borderRadius: 8, padding: '12px', fontSize: 13, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', marginTop: 14 },
 
-  chatArea: { flex: 1, overflowY: 'auto', padding: 16, display: 'flex', flexDirection: 'column', gap: 8 },
+  chatArea: { flex: 1, overflowY: 'auto', padding: '36px 16px 16px', display: 'flex', flexDirection: 'column', gap: 8 },
   msgRow: { display: 'flex', width: '100%' },
   msgBubble: { maxWidth: '82%', padding: '12px 16px', borderRadius: 12, fontSize: 14, lineHeight: 1.6, position: 'relative' },
   userBubble: { background: '#1A3A5C', color: '#E8E6E1', borderBottomRightRadius: 4 },
@@ -1176,10 +1266,11 @@ const S = {
 
   // Debrief
   debriefBtn: { marginLeft: 'auto', background: '#1A2A3A', border: '1px solid #3A5A7A', color: '#6FA8DC', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
-  debriefPanel: { background: '#161E2B', border: '1px solid #D4A843', borderRadius: 10, padding: 16, margin: '12px 0' },
+  debriefPanel: { position: 'fixed', top: 60, left: 16, right: 16, bottom: 80, background: '#161E2B', border: '2px solid #D4A843', borderRadius: 14, padding: '16px 18px', zIndex: 50, overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,.6)' },
+  debriefHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   debriefInHistory: { marginTop: 12, padding: '12px 0 0', borderTop: '1px solid #2A3A4A' },
 
-  hintCard: { margin: '0 16px 8px', background: '#1F2A1A', border: '1px solid #4A5A2A', borderRadius: 10, padding: '12px 14px', maxHeight: '32vh', overflowY: 'auto' },
+  hintCard: { position: 'fixed', bottom: 80, left: 16, right: 16, background: '#1F2A1A', border: '2px solid #4A5A2A', borderRadius: 12, padding: '14px 16px', maxHeight: '45vh', overflowY: 'auto', zIndex: 40, boxShadow: '0 -8px 30px rgba(0,0,0,.5)' },
   hintHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
   hintLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#A8C843', fontWeight: 700 },
   hintClose: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 14 },
@@ -1256,14 +1347,38 @@ const S = {
   tWho: { fontSize: 9, fontWeight: 700, letterSpacing: '1px', flexShrink: 0, width: 56, paddingTop: 2 },
   tText: { color: '#C8C8C8', whiteSpace: 'pre-wrap' },
 
-  // WHY Progress Bar
-  whyBarWrap: { padding: '8px 16px 4px', background: '#0F1419', borderBottom: '1px solid #1A2332' },
+  // API Usage Bar
+  usageBar: { position: 'absolute', top: 52, left: 0, right: 0, padding: '4px 14px 6px', background: '#0F1419', borderBottom: '1px solid #1A2332', zIndex: 19 },
+  usageTop: { display: 'flex', alignItems: 'center', gap: 8, marginBottom: 3 },
+  usageLabel: { fontSize: 9, letterSpacing: '1.5px', color: '#8899A6', fontWeight: 700 },
+  usagePct: { fontSize: 11, color: '#E8E6E1', fontWeight: 700, fontFamily: 'monospace' },
+  usageDetail: { fontSize: 10, color: '#5A6A7A', fontFamily: 'monospace' },
+  usageTimer: { fontSize: 10, color: '#43A047', fontWeight: 600, marginLeft: 'auto' },
+  usageTrack: { height: 6, background: '#1A2332', borderRadius: 3, overflow: 'hidden' },
+  usageFill: { height: '100%', borderRadius: 3, transition: 'width .6s ease, background .6s ease' },
+
+  // WHY Progress Bar (bottom, replaces input area)
+  whyBarBottom: { padding: '10px 16px', borderTop: '1px solid #D4A843', background: '#0F1419', position: 'sticky', bottom: 0 },
   whyBarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
   whyBarLabel: { fontSize: 10, letterSpacing: '1.5px', color: '#D4A843', fontWeight: 700 },
   whyBarPct: { fontSize: 12, color: '#E8E6E1', fontWeight: 700, fontFamily: 'monospace' },
   whyBarTrack: { height: 10, background: '#1A2332', borderRadius: 5, overflow: 'hidden' },
   whyBarFill: { height: '100%', borderRadius: 5, transition: 'width .6s ease, background .6s ease' },
   whyBarHint: { fontSize: 11, color: '#8899A6', marginTop: 4, fontStyle: 'italic' },
+
+  // Drill Progress Bar (bottom, gauntlet mode)
+  drillBarBottom: { padding: '10px 16px', borderTop: '1px solid #2A3A4A', background: '#0F1419', position: 'sticky', bottom: 0 },
+  drillBarHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 4 },
+  drillBarLabel: { fontSize: 11, letterSpacing: '1px', fontWeight: 700, color: '#E8E6E1' },
+  drillBarPct: { fontSize: 12, color: '#E8E6E1', fontWeight: 700, fontFamily: 'monospace' },
+  drillBarTrack: { height: 12, background: '#1A2332', borderRadius: 6, overflow: 'hidden', marginBottom: 6 },
+  drillBarFill: { height: '100%', borderRadius: 6, transition: 'width .6s ease', background: 'linear-gradient(90deg, #E53935, #D4A843 50%, #43A047)' },
+  drillBarPhases: { display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 6, marginBottom: 4 },
+  drillPhase: { display: 'flex', alignItems: 'center', gap: 4, fontSize: 10, color: '#C8C8C8', fontWeight: 600, transition: 'opacity .3s' },
+  drillPhaseDot: { width: 8, height: 8, borderRadius: '50%', transition: 'background .3s' },
+  drillPhaseArrow: { fontSize: 10, color: '#5A6A7A' },
+  drillBarHint: { fontSize: 11, color: '#8899A6', marginTop: 2, marginBottom: 8, fontStyle: 'italic' },
+  drillInputRow: { display: 'flex', gap: 8, alignItems: 'flex-end' },
 
   // Congrats overlay
   congratsOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
