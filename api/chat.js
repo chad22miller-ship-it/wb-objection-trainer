@@ -23,7 +23,9 @@ async function callGemini(apiKey, body) {
     const data = await res.json();
     if (res.ok) {
       const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
-      return { ok: true, text };
+      // Empty text (e.g. budget eaten by thinking, or a safety block) => treat as a
+      // miss so the failover loop moves on instead of returning a blank reply.
+      return text ? { ok: true, text } : { ok: false, status: 502 };
     }
     return { ok: false, status: res.status };
   } catch (err) {
@@ -120,55 +122,24 @@ async function callAnthropic(apiKey, system, messages, max_tokens) {
   }
 }
 
-// --- Cooldown & usage tracking ---
+// --- Cooldown tracking (per serverless instance) ---
 const cooldowns = new Map();
-const usage = { gemini: [], groq: [], openrouter: [], anthropic: [], startedAt: Date.now() };
+const startedAt = Date.now();
 
 function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
 function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
-function trackUsage(provider) { usage[provider].push(Date.now()); }
 
-// Daily limits per key
-const LIMITS = { gemini: 1500, groq: 14400, openrouter: 10000, anthropic: 1000 };
-
+// Honest, per-instance health signal. Vercel runs many isolated serverless
+// instances that don't share memory, so a true fleet-wide usage total isn't
+// available here. We report whether THIS instance is currently throttling a key
+// (any active cooldown) rather than a misleading global percentage.
 export function getUsageStats() {
   const now = Date.now();
-  const dayAgo = now - 86400000;
-  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
-  const groqKeys = (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
-
-  const count = (arr) => arr.filter((t) => t > dayAgo).length;
-  const geminiUsed = count(usage.gemini);
-  const groqUsed = count(usage.groq);
-  const openrouterUsed = count(usage.openrouter);
-  const anthropicUsed = count(usage.anthropic);
-
-  const geminiMax = geminiKeys.length * LIMITS.gemini;
-  const groqMax = groqKeys.length * LIMITS.groq;
-  const openrouterMax = process.env.OPENROUTER_API_KEY ? LIMITS.openrouter : 0;
-  const anthropicMax = process.env.ANTHROPIC_API_KEY ? LIMITS.anthropic : 0;
-
-  const totalUsed = geminiUsed + groqUsed + openrouterUsed + anthropicUsed;
-  const totalMax = geminiMax + groqMax + openrouterMax + anthropicMax;
-  const pct = totalMax > 0 ? Math.round((totalUsed / totalMax) * 100) : 0;
-
-  // Estimate time left based on recent rate
-  const recentWindow = 600000; // 10 min
-  const recentAll = [...usage.gemini, ...usage.groq, ...usage.openrouter, ...usage.anthropic].filter((t) => t > now - recentWindow);
-  const ratePerMin = recentAll.length / (recentWindow / 60000);
-  const remaining = totalMax - totalUsed;
-  const minsLeft = ratePerMin > 0 ? Math.round(remaining / ratePerMin) : null;
-
+  const anyCooling = [...cooldowns.values()].some((t) => t > now);
   return {
-    totalUsed, totalMax, pct,
-    ratePerMin: Math.round(ratePerMin * 10) / 10,
-    minsLeft,
-    providers: {
-      gemini: { used: geminiUsed, max: geminiMax, keys: geminiKeys.length },
-      groq: { used: groqUsed, max: groqMax, keys: groqKeys.length },
-      openrouter: { used: openrouterUsed, max: openrouterMax },
-      anthropic: { used: anthropicUsed, max: anthropicMax },
-    },
+    scope: 'instance',
+    health: anyCooling ? 'throttled' : 'ok',
+    sinceMins: Math.round((now - startedAt) / 60000),
   };
 }
 
@@ -197,8 +168,18 @@ export default async function handler(req, res) {
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: typeof m.content === 'string' ? m.content : '' }],
     }));
-    const geminiBody = { contents, generationConfig: { maxOutputTokens: max_tokens } };
+    const geminiBody = {
+      contents,
+      generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingBudget: 0 } },
+    };
     if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
+
+    // Track the most relevant failure so a real outage/bad-key/timeout isn't
+    // mislabeled as a rate limit. allRateLimited stays true only if every
+    // attempted provider returned 429.
+    let lastStatus;
+    let allRateLimited = true;
+    const note = (s) => { lastStatus = s; if (s !== 429) allRateLimited = false; };
 
     // --- 1. Try Gemini keys ---
     for (let i = 0; i < geminiKeys.length; i++) {
@@ -206,10 +187,11 @@ export default async function handler(req, res) {
       if (!isReady(id)) continue;
       const result = await callGemini(geminiKeys[i], geminiBody);
       if (result.ok) {
-        trackUsage('gemini'); console.log(`[chat] ✓ Gemini key${i + 1}`);
+        console.log(`[chat] ✓ Gemini key${i + 1}`);
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown(id, 60000);
+      note(result.status);
     }
 
     // --- 2. Try Groq keys ---
@@ -218,34 +200,44 @@ export default async function handler(req, res) {
       if (!isReady(id)) continue;
       const result = await callGroq(groqKeys[i], system, messages, max_tokens);
       if (result.ok) {
-        trackUsage('groq'); console.log(`[chat] ✓ Groq key${i + 1}`);
+        console.log(`[chat] ✓ Groq key${i + 1}`);
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown(id, 60000);
+      note(result.status);
     }
 
     // --- 3. Try OpenRouter ---
     if (openrouterKey && isReady('openrouter:0')) {
       const result = await callOpenRouter(openrouterKey, system, messages, max_tokens);
       if (result.ok) {
-        trackUsage('openrouter'); console.log('[chat] ✓ OpenRouter');
+        console.log('[chat] ✓ OpenRouter');
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown('openrouter:0', 60000);
+      note(result.status);
     }
 
     // --- 4. Try Anthropic ---
     if (anthropicKey && isReady('anthropic:0')) {
       const result = await callAnthropic(anthropicKey, system, messages, max_tokens);
       if (result.ok) {
-        trackUsage('anthropic'); console.log('[chat] ✓ Anthropic');
+        console.log('[chat] ✓ Anthropic');
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown('anthropic:0', 60000);
+      note(result.status);
     }
 
-    console.log('[chat] ✗ All providers exhausted');
-    return res.status(429).json({ error: 'AI is busy. Wait a moment and try again.' });
+    console.log('[chat] ✗ All providers exhausted, lastStatus=', lastStatus);
+    if (allRateLimited) {
+      return res.status(429).json({ error: 'AI is busy. Wait a moment and try again.' });
+    }
+    const msg = lastStatus === 401 ? 'AI auth failed (bad or expired key).'
+      : lastStatus === 408 ? 'AI timed out.'
+      : lastStatus === 400 ? 'Bad request to AI.'
+      : 'AI service error.';
+    return res.status(lastStatus || 500).json({ error: msg, reason: 'all_providers_failed' });
   } catch (err) {
     console.error('API proxy error:', err);
     return res.status(500).json({ error: 'Server error' });

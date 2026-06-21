@@ -838,25 +838,14 @@ function Trainer({ user }) {
           <button style={S.iconBtn} onClick={() => setSettingsOpen((o) => !o)} title="Settings">⚙</button>
         </div>
 
-        {/* API Usage Bar */}
-        {apiUsage && (
+        {/* AI status — honest per-instance health signal */}
+        {apiUsage && apiUsage.health && (
           <div style={S.usageBar}>
             <div style={S.usageTop}>
-              <span style={S.usageLabel}>API USAGE</span>
-              <span style={S.usagePct}>{apiUsage.pct}%</span>
-              <span style={S.usageDetail}>{apiUsage.totalUsed}/{apiUsage.totalMax}</span>
-              {apiUsage.minsLeft != null && (
-                <span style={S.usageTimer}>
-                  {apiUsage.minsLeft >= 60 ? `~${Math.round(apiUsage.minsLeft / 60)}h left` : `~${apiUsage.minsLeft}m left`}
-                </span>
-              )}
-            </div>
-            <div style={S.usageTrack}>
-              <div style={{
-                ...S.usageFill,
-                width: `${Math.min(apiUsage.pct, 100)}%`,
-                background: apiUsage.pct >= 90 ? '#E53935' : apiUsage.pct >= 60 ? '#D4A843' : '#43A047',
-              }} />
+              <span style={S.usageLabel}>AI STATUS</span>
+              <span style={{ ...S.usagePct, color: apiUsage.health === 'ok' ? '#43A047' : '#D4A843' }}>
+                {apiUsage.health === 'ok' ? '🟢 Ready' : '🟡 Busy — rotating keys'}
+              </span>
             </div>
           </div>
         )}
@@ -1115,6 +1104,10 @@ function Trainer({ user }) {
             {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
             {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
             {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
+          </div>
+          <div style={{ ...S.drillInputRow, justifyContent: 'center', marginTop: 8 }}>
+            <button style={S.callCircle} onClick={startCall} title="Resume live call">📞</button>
+            <span style={{ fontSize: 12, color: '#8899A6', alignSelf: 'center' }}>Tap to talk to the prospect</span>
           </div>
         </div>
 

@@ -30,7 +30,9 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
         }
         console.error('API error:', res.status, err);
         if (res.status === 429) return '⚠️ AI is rate-limited (too many requests). Wait 30 seconds and try again.';
-        return 'Connection error. Try again.';
+        if (res.status === 401) return '⚠️ AI key problem — ask your team lead to check the API keys.';
+        if (res.status === 408) return 'AI timed out. Try again.';
+        return err.error || 'Connection error. Try again.';
       }
 
       const data = await res.json();
