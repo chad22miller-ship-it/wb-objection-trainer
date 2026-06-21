@@ -1182,7 +1182,7 @@ function Trainer({ user }) {
 /* ============================== STYLES ============================== */
 
 const S = {
-  container: { minHeight: '100vh', background: '#0F1419', color: '#E8E6E1', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display: 'flex', flexDirection: 'column' },
+  container: { height: '100vh', background: '#0F1419', color: '#E8E6E1', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display: 'flex', flexDirection: 'column', overflow: 'hidden' },
   landing: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: '24px' },
   logoMark: { fontSize: 14, fontWeight: 700, letterSpacing: '3px', color: '#D4A843', border: '1px solid #D4A843', padding: '6px 14px', marginBottom: 28 },
   title: { fontSize: 28, fontWeight: 800, letterSpacing: '4px', margin: '0 0 8px 0' },
