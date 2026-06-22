@@ -1079,7 +1079,12 @@ function Trainer({ user }) {
           </div>
           {debriefLoading
             ? <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
-            : <div style={S.coachText}>{debriefText}</div>
+            : (
+              <>
+                <div style={S.coachText}>{debriefText}</div>
+                <button style={{ ...S.redeemBtn, marginTop: 14, width: '100%', padding: '10px 12px' }} onClick={redeemThisCall}>🛟 Redeem this call — see how Raja would run it</button>
+              </>
+            )
           }
         </div>
       )}
@@ -1175,10 +1180,7 @@ function Trainer({ user }) {
           </div>
         )}
         <div style={S.actionRight}>
-          {mode !== 'raja' && messages.length >= 2 && (
-            <button style={S.redeemBtn} onClick={redeemThisCall}>🛟 Redeem this call</button>
-          )}
-          {mode === 'roleplay' && messages.length >= 4 && !showDebrief && (
+          {(mode === 'roleplay' || mode === 'drill') && messages.length >= 4 && !showDebrief && (
             <button style={{ ...S.debriefBtn, marginLeft: 0 }} onClick={runDebrief}>📋 End &amp; Debrief</button>
           )}
         </div>
