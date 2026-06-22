@@ -655,8 +655,8 @@ function Trainer({ user }) {
     e.target.value = '';
   };
 
-  const runRedempter = async () => {
-    const text = redempterInput.trim();
+  const runRedempter = async (overrideText) => {
+    const text = (typeof overrideText === 'string' ? overrideText : redempterInput).trim();
     if (!text || redempterLoading) return;
     setRedempterLoading(true);
     setRedempterResult('');
@@ -664,6 +664,60 @@ function Trainer({ user }) {
     setRedempterResult(reply);
     setRedempterLoading(false);
   };
+
+  // Feed the current in-app session straight into the Redempter coach
+  const redeemThisCall = () => {
+    if (!messages.length) return;
+    const t = messages.map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
+    setRedempterInput(t);
+    setRedempterResult('');
+    setRedempterOpen(true);
+    runRedempter(t);
+  };
+
+  // Shared Redempter modal — rendered from both the home screen and a live session
+  const redempterModalEl = redempterOpen && (
+    <div style={S.redempterOverlay} onClick={() => !redempterLoading && setRedempterOpen(false)}>
+      <div style={S.redempterModal} onClick={(e) => e.stopPropagation()}>
+        <div style={S.redempterHeader}>
+          <div>
+            <div style={S.redempterTitle}>🛟 REDEMPTER</div>
+            <div style={S.redempterSub}>Paste a key objection or an entire Zoom transcript / call. Raja shows you how to redeem it.</div>
+          </div>
+          <button style={S.redempterX} onClick={() => setRedempterOpen(false)}>✕</button>
+        </div>
+
+        {redempterLoading ? (
+          <div style={S.redempterLoadingBox}>
+            <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+            <div>Raja is reading your call…</div>
+          </div>
+        ) : redempterResult ? (
+          <>
+            <div style={S.redempterResult}>{redempterResult}</div>
+            <div style={S.redempterActions}>
+              <button style={S.redempterReset} onClick={() => setRedempterResult('')}>↩ New paste</button>
+              <button style={S.redempterGo} onClick={() => { setRedempterResult(''); setRedempterInput(''); setRedempterOpen(false); }}>Done</button>
+            </div>
+          </>
+        ) : (
+          <>
+            <textarea style={S.redempterTextarea} value={redempterInput}
+              onChange={(e) => setRedempterInput(e.target.value)}
+              placeholder="Paste the objection the client gave you, or the entire call / Zoom transcript here…" />
+            <div style={S.redempterActions}>
+              <label style={S.redempterUpload}>
+                📎 Upload transcript file
+                <input type="file" accept=".txt,.vtt,.csv,.md,.srt,text/plain" style={{ display: 'none' }} onChange={handleRedempterFile} />
+              </label>
+              <button style={{ ...S.redempterGo, opacity: !redempterInput.trim() ? 0.4 : 1 }}
+                disabled={!redempterInput.trim()} onClick={() => runRedempter()}>Get Raja&apos;s Help</button>
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
 
   /* ============================== RENDER ============================== */
 
@@ -721,49 +775,7 @@ function Trainer({ user }) {
           <button style={S.redempterLink} onClick={() => setRedempterOpen(true)}>🛟 Redempter — fix a real objection or call</button>
           <button style={S.historyLink} onClick={openHistory}>📊 History &amp; Patterns</button>
         </div>
-
-        {redempterOpen && (
-          <div style={S.redempterOverlay} onClick={() => !redempterLoading && setRedempterOpen(false)}>
-            <div style={S.redempterModal} onClick={(e) => e.stopPropagation()}>
-              <div style={S.redempterHeader}>
-                <div>
-                  <div style={S.redempterTitle}>🛟 REDEMPTER</div>
-                  <div style={S.redempterSub}>Paste a key objection or an entire Zoom transcript / call. Raja shows you how to redeem it.</div>
-                </div>
-                <button style={S.redempterX} onClick={() => setRedempterOpen(false)}>✕</button>
-              </div>
-
-              {redempterLoading ? (
-                <div style={S.redempterLoadingBox}>
-                  <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
-                  <div>Raja is reading your call…</div>
-                </div>
-              ) : redempterResult ? (
-                <>
-                  <div style={S.redempterResult}>{redempterResult}</div>
-                  <div style={S.redempterActions}>
-                    <button style={S.redempterReset} onClick={() => setRedempterResult('')}>↩ New paste</button>
-                    <button style={S.redempterGo} onClick={() => { setRedempterResult(''); setRedempterInput(''); setRedempterOpen(false); }}>Done</button>
-                  </div>
-                </>
-              ) : (
-                <>
-                  <textarea style={S.redempterTextarea} value={redempterInput}
-                    onChange={(e) => setRedempterInput(e.target.value)}
-                    placeholder="Paste the objection the client gave you, or the entire call / Zoom transcript here…" />
-                  <div style={S.redempterActions}>
-                    <label style={S.redempterUpload}>
-                      📎 Upload transcript file
-                      <input type="file" accept=".txt,.vtt,.csv,.md,.srt,text/plain" style={{ display: 'none' }} onChange={handleRedempterFile} />
-                    </label>
-                    <button style={{ ...S.redempterGo, opacity: !redempterInput.trim() ? 0.4 : 1 }}
-                      disabled={!redempterInput.trim()} onClick={runRedempter}>Get Raja&apos;s Help</button>
-                  </div>
-                </>
-              )}
-            </div>
-          </div>
-        )}
+        {redempterModalEl}
       </div>
     );
   }
@@ -1162,9 +1174,14 @@ function Trainer({ user }) {
             )}
           </div>
         )}
-        {mode === 'roleplay' && messages.length >= 4 && !showDebrief && (
-          <button style={S.debriefBtn} onClick={runDebrief}>📋 End &amp; Debrief</button>
-        )}
+        <div style={S.actionRight}>
+          {mode !== 'raja' && messages.length >= 2 && (
+            <button style={S.redeemBtn} onClick={redeemThisCall}>🛟 Redeem this call</button>
+          )}
+          {mode === 'roleplay' && messages.length >= 4 && !showDebrief && (
+            <button style={{ ...S.debriefBtn, marginLeft: 0 }} onClick={runDebrief}>📋 End &amp; Debrief</button>
+          )}
+        </div>
       </div>
 
       {/* WHY Progress Bar — replaces input in roleplay after first message */}
@@ -1252,6 +1269,8 @@ function Trainer({ user }) {
           <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
         </div>
       )}
+
+      {redempterModalEl}
     </div>
   );
 }
@@ -1361,6 +1380,8 @@ const S = {
   stopSpeakBtn: { background: '#2A3A4A', border: 'none', color: '#E8E6E1', fontSize: 11, padding: '4px 12px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
 
   actionBar: { padding: '0 16px 6px', display: 'flex', position: 'relative', alignItems: 'center', zIndex: 20 },
+  actionRight: { marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' },
+  redeemBtn: { background: '#2A1E12', border: '1px solid #D4A843', color: '#D4A843', fontSize: 12, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700 },
   hintWrap: { position: 'relative', zIndex: 20 },
   hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
