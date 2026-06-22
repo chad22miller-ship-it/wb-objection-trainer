@@ -8,7 +8,7 @@ import {
   CALIB_PHRASE, CALIB_WORDS, REF_HZ, BASELINE_WPM,
 } from './lib/speech';
 import {
-  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_DEBRIEF,
+  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_REDEMPTER, SYSTEM_DEBRIEF,
   ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT,
   PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
 } from './constants';
@@ -102,6 +102,12 @@ function Trainer({ user }) {
 
   // API usage stats
   const [apiUsage, setApiUsage] = useState(null);
+
+  // Redempter — paste a real objection or transcript, get Raja-style coaching
+  const [redempterOpen, setRedempterOpen] = useState(false);
+  const [redempterInput, setRedempterInput] = useState('');
+  const [redempterResult, setRedempterResult] = useState('');
+  const [redempterLoading, setRedempterLoading] = useState(false);
 
   const [history, setHistory] = useState([]);
   const [expanded, setExpanded] = useState(null);
@@ -639,6 +645,26 @@ function Trainer({ user }) {
     };
   };
 
+  /* ---------- Redempter: coach a real objection or transcript ---------- */
+  const handleRedempterFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => setRedempterInput(String(reader.result || '').slice(0, 200000));
+    reader.readAsText(file);
+    e.target.value = '';
+  };
+
+  const runRedempter = async () => {
+    const text = redempterInput.trim();
+    if (!text || redempterLoading) return;
+    setRedempterLoading(true);
+    setRedempterResult('');
+    const reply = await callAPI([{ role: 'user', content: text.slice(0, 100000) }], SYSTEM_REDEMPTER, { timeoutMs: 120000 });
+    setRedempterResult(reply);
+    setRedempterLoading(false);
+  };
+
   /* ============================== RENDER ============================== */
 
   if (view === 'admin') {
@@ -692,8 +718,52 @@ function Trainer({ user }) {
             </button>
           </div>
 
+          <button style={S.redempterLink} onClick={() => setRedempterOpen(true)}>🛟 Redempter — fix a real objection or call</button>
           <button style={S.historyLink} onClick={openHistory}>📊 History &amp; Patterns</button>
         </div>
+
+        {redempterOpen && (
+          <div style={S.redempterOverlay} onClick={() => !redempterLoading && setRedempterOpen(false)}>
+            <div style={S.redempterModal} onClick={(e) => e.stopPropagation()}>
+              <div style={S.redempterHeader}>
+                <div>
+                  <div style={S.redempterTitle}>🛟 REDEMPTER</div>
+                  <div style={S.redempterSub}>Paste a key objection or an entire Zoom transcript / call. Raja shows you how to redeem it.</div>
+                </div>
+                <button style={S.redempterX} onClick={() => setRedempterOpen(false)}>✕</button>
+              </div>
+
+              {redempterLoading ? (
+                <div style={S.redempterLoadingBox}>
+                  <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+                  <div>Raja is reading your call…</div>
+                </div>
+              ) : redempterResult ? (
+                <>
+                  <div style={S.redempterResult}>{redempterResult}</div>
+                  <div style={S.redempterActions}>
+                    <button style={S.redempterReset} onClick={() => setRedempterResult('')}>↩ New paste</button>
+                    <button style={S.redempterGo} onClick={() => { setRedempterResult(''); setRedempterInput(''); setRedempterOpen(false); }}>Done</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <textarea style={S.redempterTextarea} value={redempterInput}
+                    onChange={(e) => setRedempterInput(e.target.value)}
+                    placeholder="Paste the objection the client gave you, or the entire call / Zoom transcript here…" />
+                  <div style={S.redempterActions}>
+                    <label style={S.redempterUpload}>
+                      📎 Upload transcript file
+                      <input type="file" accept=".txt,.vtt,.csv,.md,.srt,text/plain" style={{ display: 'none' }} onChange={handleRedempterFile} />
+                    </label>
+                    <button style={{ ...S.redempterGo, opacity: !redempterInput.trim() ? 0.4 : 1 }}
+                      disabled={!redempterInput.trim()} onClick={runRedempter}>Get Raja&apos;s Help</button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        )}
       </div>
     );
   }
@@ -1390,6 +1460,22 @@ const S = {
   // Congrats overlay
   congratsOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100 },
   congratsModal: { background: '#161E2B', border: '2px solid #D4A843', borderRadius: 16, padding: '32px 28px', textAlign: 'center', maxWidth: 400, width: '90%', boxShadow: '0 0 60px rgba(212,168,67,.3)' },
+
+  // Redempter modal
+  redempterLink: { marginTop: 14, background: 'none', border: '1px solid #D4A843', color: '#D4A843', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px', fontWeight: 700 },
+  redempterOverlay: { position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.75)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 100, padding: 16 },
+  redempterModal: { background: '#161E2B', border: '2px solid #D4A843', borderRadius: 16, padding: '20px 22px', maxWidth: 640, width: '100%', maxHeight: '85vh', display: 'flex', flexDirection: 'column', boxShadow: '0 0 60px rgba(212,168,67,.25)' },
+  redempterHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 12, marginBottom: 14 },
+  redempterTitle: { fontSize: 18, fontWeight: 800, letterSpacing: '2px', color: '#D4A843' },
+  redempterSub: { fontSize: 12, color: '#8899A6', marginTop: 4, lineHeight: 1.5 },
+  redempterX: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 16, flexShrink: 0 },
+  redempterTextarea: { width: '100%', minHeight: 190, background: '#0F1419', border: '1px solid #2A3A4A', borderRadius: 8, padding: 12, color: '#E8E6E1', fontSize: 13, fontFamily: 'inherit', resize: 'vertical', outline: 'none', lineHeight: 1.5, boxSizing: 'border-box' },
+  redempterActions: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 10, marginTop: 12 },
+  redempterUpload: { fontSize: 12, color: '#8899A6', cursor: 'pointer', border: '1px solid #2A3A4A', borderRadius: 6, padding: '8px 14px', fontWeight: 600 },
+  redempterGo: { background: '#D4A843', border: 'none', borderRadius: 8, color: '#0F1419', fontWeight: 700, fontSize: 13, padding: '10px 22px', cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
+  redempterReset: { background: 'none', border: '1px solid #2A3A4A', borderRadius: 8, color: '#8899A6', fontWeight: 600, fontSize: 13, padding: '10px 18px', cursor: 'pointer', fontFamily: 'inherit' },
+  redempterResult: { flex: 1, minHeight: 0, overflowY: 'auto', fontSize: 14, lineHeight: 1.7, color: '#D8D8D8', whiteSpace: 'pre-wrap', padding: '4px 2px' },
+  redempterLoadingBox: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 12, padding: '40px 0', color: '#8899A6', fontSize: 13 },
   congratsEmoji: { fontSize: 56, marginBottom: 12 },
   congratsTitle: { fontSize: 24, fontWeight: 900, color: '#D4A843', letterSpacing: '2px', marginBottom: 12 },
   congratsBody: { fontSize: 15, lineHeight: 1.7, color: '#C8C8C8', marginBottom: 20 },
