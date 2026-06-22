@@ -99,6 +99,7 @@ function Trainer({ user }) {
   const [whyProgress, setWhyProgress] = useState(0);
   const [showCongrats, setShowCongrats] = useState(false);
   const [drillProgress, setDrillProgress] = useState(0);
+  const [isSeeded, setIsSeeded] = useState(false); // roleplay seeded with a prior Raja call
 
   // API usage stats
   const [apiUsage, setApiUsage] = useState(null);
@@ -136,6 +137,7 @@ function Trainer({ user }) {
   const modeRef = useRef(null);
   const difficultyRef = useRef(3);
   const profileIdxRef = useRef(0);
+  const seedRef = useRef(null); // prior-call transcript when replaying as the rep
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
@@ -428,7 +430,14 @@ function Trainer({ user }) {
   const buildSystem = useCallback((m, diff, pIdx) => {
     if (m === 'drill') return SYSTEM_DRILL + '\n\n' + DRILL_DIFF[diff];
     if (m === 'raja') return SYSTEM_RAJA;
-    return SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff] + '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
+    let sys = SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff];
+    if (seedRef.current) {
+      // Replaying a Raja call: BE the same client, now the trainee runs discovery.
+      sys += '\n\nSEEDED STORY — CRITICAL: You are the SAME client from the call below, where a master rep named Raja was selling to YOU. Become that exact client — same name if one was given, same job/money/family details, and the SAME deep emotional WHY you revealed. A trainee rep is now going to run the call and try to uncover everything Raja uncovered. Stay 100% consistent with the story below, but make them EARN it like a real person would: reveal your situation and your WHY only as they ask good, caring, layered questions. Do not dump it all at once. If they get pushy, pitch early, or skip discovery, get guarded and pull back.\n\nPRIOR CALL (you are the CLIENT in it):\n' + seedRef.current;
+    } else {
+      sys += '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
+    }
+    return sys;
   }, []);
 
   /* ---------- save session ---------- */
@@ -456,11 +465,14 @@ function Trainer({ user }) {
   const formatTime = (s) => `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
 
   /* ---------- session start ---------- */
-  const startSession = useCallback(async (m, diff) => {
+  const startSession = useCallback(async (m, diff, seed = null) => {
     stopSpeaking(); stopTimer();
     const id = 'sess_' + Date.now();
     const pIdx = Math.floor(Math.random() * PROSPECT_PROFILES.length);
     const prospect = PROSPECT_PROFILES[pIdx];
+
+    seedRef.current = seed || null;
+    setIsSeeded(!!seed);
 
     sessionRef.current = {
       id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
@@ -577,6 +589,14 @@ function Trainer({ user }) {
 
   // Raja <-> Prospect are mirror roles; this returns the flipped mode (null for drill).
   const flipMode = (m) => (m === 'raja' ? 'roleplay' : m === 'roleplay' ? 'raja' : null);
+
+  // Switch roles out of a Raja call: replay the SAME client story, but now the
+  // trainee runs discovery as the rep (seeded roleplay).
+  const switchRolesFromRaja = () => {
+    const seed = messagesRef.current
+      .map((m) => `${m.role === 'user' ? 'CLIENT' : 'RAJA'}: ${m.content}`).join('\n\n');
+    startSession('roleplay', difficulty, seed);
+  };
 
   /* ---------- hints ---------- */
   const getHint = useCallback(async (type) => {
@@ -1052,9 +1072,19 @@ function Trainer({ user }) {
         {/* FIX #2: Roleplay shows prospect info and prompts rep to open */}
         {mode === 'roleplay' && noMessages && !loading && (
           <div style={S.prospectCard}>
-            <div style={S.prospectName}>{prospect.name}</div>
-            <div style={S.prospectVibe}>{prospect.vibe}</div>
-            <div style={S.prospectPrompt}>Open the call. Say whatever you'd say in real life.</div>
+            {isSeeded ? (
+              <>
+                <div style={S.prospectName}>🔄 Same client as Raja's call</div>
+                <div style={S.prospectVibe}>Now YOU run it. Uncover the same story and WHY — like Raja did.</div>
+                <div style={S.prospectPrompt}>Open the call. If you drift off track, a “What would Raja do?” button appears.</div>
+              </>
+            ) : (
+              <>
+                <div style={S.prospectName}>{prospect.name}</div>
+                <div style={S.prospectVibe}>{prospect.vibe}</div>
+                <div style={S.prospectPrompt}>Open the call. Say whatever you'd say in real life.</div>
+              </>
+            )}
           </div>
         )}
 
@@ -1101,8 +1131,8 @@ function Trainer({ user }) {
                 )}
                 <div style={S.debriefActions}>
                   {flipMode(mode) && (
-                    <button style={S.debriefActionBtn} onClick={() => startSession(flipMode(mode), difficulty)}>
-                      🔄 Switch roles — {flipMode(mode) === 'raja' ? 'watch Raja run this' : 'now YOU run it'}
+                    <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : startSession('raja', difficulty)}>
+                      🔄 Switch roles — {mode === 'raja' ? 'now YOU run this same call' : 'watch Raja run it'}
                     </button>
                   )}
                   <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty)}>↻ Run it again</button>
@@ -1225,14 +1255,21 @@ function Trainer({ user }) {
               background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
             }} />
           </div>
-          <div style={S.whyBarHint}>
-            {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
-            {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
-            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
-            {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
-            {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
-            {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
-          </div>
+          {messages.filter((m) => m.role === 'user').length >= 3 && whyProgress <= 2 ? (
+            <div style={S.offTrackBox}>
+              <span style={S.offTrackLabel}>⚠️ Off track — you haven't gotten near their WHY.</span>
+              <button style={S.offTrackBtn} onClick={() => getHint('strategy')}>💡 What would Raja do?</button>
+            </div>
+          ) : (
+            <div style={S.whyBarHint}>
+              {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
+              {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
+              {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
+              {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
+              {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
+              {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
+            </div>
+          )}
           <div style={{ ...S.drillInputRow, justifyContent: 'center', marginTop: 8 }}>
             <button style={S.callCircle} onClick={startCall} title="Resume live call">📞</button>
             <span style={{ fontSize: 12, color: '#8899A6', alignSelf: 'center' }}>Tap to talk to the prospect</span>
@@ -1412,6 +1449,9 @@ const S = {
   debriefActions: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14, borderTop: '1px solid #2A3A4A', paddingTop: 14 },
   debriefActionBtn: { background: '#1A2332', border: '1px solid #3A5A7A', color: '#9CC4E8', fontSize: 13, fontWeight: 700, padding: '11px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
   debriefActionGhost: { background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 13, fontWeight: 600, padding: '10px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
+  offTrackBox: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 4, padding: '6px 10px', background: '#2A1414', border: '1px solid #5A2A2A', borderRadius: 8 },
+  offTrackLabel: { fontSize: 11, color: '#E0A8A8', fontWeight: 600, lineHeight: 1.3 },
+  offTrackBtn: { flexShrink: 0, background: '#D4A843', border: 'none', color: '#0F1419', fontSize: 11, fontWeight: 700, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
   hintWrap: { position: 'relative', zIndex: 20 },
   hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
