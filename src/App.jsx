@@ -8,7 +8,7 @@ import {
   CALIB_PHRASE, CALIB_WORDS, REF_HZ, BASELINE_WPM,
 } from './lib/speech';
 import {
-  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_REDEMPTER, SYSTEM_DEBRIEF,
+  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_RAJA_RECAP, SYSTEM_REDEMPTER, SYSTEM_DEBRIEF,
   ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT,
   PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
 } from './constants';
@@ -551,18 +551,32 @@ function Trainer({ user }) {
   const runDebrief = useCallback(async () => {
     stopTimer();
     setDebriefLoading(true); setShowDebrief(true); setDebriefText(''); setDebriefScores(null);
+    const isRaja = modeRef.current === 'raja';
     const transcript = messagesRef.current
-      .map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
+      .map((m) => isRaja
+        ? `${m.role === 'user' ? 'CLIENT' : 'RAJA'}: ${m.content}`
+        : `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
     const reply = await callAPI(
-      [{ role: 'user', content: `Full roleplay transcript:\n\n${transcript}\n\nDebrief this rep.` }],
-      SYSTEM_DEBRIEF
+      [{ role: 'user', content: isRaja
+          ? `Transcript of Raja's call (the trainee played the client):\n\n${transcript}\n\nRecap it for the trainee.`
+          : `Full roleplay transcript:\n\n${transcript}\n\nDebrief this rep.` }],
+      isRaja ? SYSTEM_RAJA_RECAP : SYSTEM_DEBRIEF
     );
     setDebriefText(reply);
-    const scores = parseDebriefScores(reply);
+    const scores = isRaja ? null : parseDebriefScores(reply);
     setDebriefScores(scores);
     await saveSession(messagesRef.current, roundsRef.current, { debrief: reply, debriefScores: scores });
     setDebriefLoading(false);
   }, [saveSession, stopTimer]);
+
+  // End the live call and, if there's a real conversation, auto-open the debrief.
+  const endCallAndDebrief = () => {
+    endCall();
+    if (messagesRef.current.length >= 4 && !showDebrief) runDebrief();
+  };
+
+  // Raja <-> Prospect are mirror roles; this returns the flipped mode (null for drill).
+  const flipMode = (m) => (m === 'raja' ? 'roleplay' : m === 'roleplay' ? 'raja' : null);
 
   /* ---------- hints ---------- */
   const getHint = useCallback(async (type) => {
@@ -1074,7 +1088,7 @@ function Trainer({ user }) {
       {showDebrief && (
         <div style={S.debriefPanel}>
           <div style={S.debriefHeader}>
-            <div style={S.coachLabel}>📋 SESSION DEBRIEF</div>
+            <div style={S.coachLabel}>{mode === 'raja' ? '🎓 RAJA RECAP' : '📋 SESSION DEBRIEF'}</div>
             <button style={S.hintClose} onClick={() => setShowDebrief(false)}>✕</button>
           </div>
           {debriefLoading
@@ -1082,7 +1096,18 @@ function Trainer({ user }) {
             : (
               <>
                 <div style={S.coachText}>{debriefText}</div>
-                <button style={{ ...S.redeemBtn, marginTop: 14, width: '100%', padding: '10px 12px' }} onClick={redeemThisCall}>🛟 Redeem this call — see how Raja would run it</button>
+                {mode !== 'raja' && (
+                  <button style={{ ...S.redeemBtn, marginTop: 14, width: '100%', padding: '10px 12px' }} onClick={redeemThisCall}>🛟 Redeem this call — see how Raja would run it</button>
+                )}
+                <div style={S.debriefActions}>
+                  {flipMode(mode) && (
+                    <button style={S.debriefActionBtn} onClick={() => startSession(flipMode(mode), difficulty)}>
+                      🔄 Switch roles — {flipMode(mode) === 'raja' ? 'watch Raja run this' : 'now YOU run it'}
+                    </button>
+                  )}
+                  <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty)}>↻ Run it again</button>
+                  <button style={S.debriefActionGhost} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>🏠 New session</button>
+                </div>
               </>
             )
           }
@@ -1157,7 +1182,7 @@ function Trainer({ user }) {
                   {callState === 'connecting' && 'Allow the mic if your browser asks.'}
                 </div>
               </div>
-              <button style={S.callEndInline} onClick={endCall}>End</button>
+              <button style={S.callEndInline} onClick={endCallAndDebrief}>End</button>
             </div>
           )}
         </div>
@@ -1180,8 +1205,8 @@ function Trainer({ user }) {
           </div>
         )}
         <div style={S.actionRight}>
-          {(mode === 'roleplay' || mode === 'drill') && messages.length >= 4 && !showDebrief && (
-            <button style={{ ...S.debriefBtn, marginLeft: 0 }} onClick={runDebrief}>📋 End &amp; Debrief</button>
+          {messages.length >= 4 && !showDebrief && (
+            <button style={{ ...S.debriefBtn, marginLeft: 0 }} onClick={runDebrief}>{mode === 'raja' ? '🎓 End & Recap' : '📋 End & Debrief'}</button>
           )}
         </div>
       </div>
@@ -1384,6 +1409,9 @@ const S = {
   actionBar: { padding: '0 16px 6px', display: 'flex', position: 'relative', alignItems: 'center', zIndex: 20 },
   actionRight: { marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' },
   redeemBtn: { background: '#2A1E12', border: '1px solid #D4A843', color: '#D4A843', fontSize: 12, padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 700 },
+  debriefActions: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14, borderTop: '1px solid #2A3A4A', paddingTop: 14 },
+  debriefActionBtn: { background: '#1A2332', border: '1px solid #3A5A7A', color: '#9CC4E8', fontSize: 13, fontWeight: 700, padding: '11px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
+  debriefActionGhost: { background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 13, fontWeight: 600, padding: '10px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
   hintWrap: { position: 'relative', zIndex: 20 },
   hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },
