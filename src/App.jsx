@@ -8,7 +8,7 @@ import {
   CALIB_PHRASE, CALIB_WORDS, REF_HZ, BASELINE_WPM,
 } from './lib/speech';
 import {
-  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_DEBRIEF,
+  SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_DEBRIEF,
   ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT,
   PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
 } from './constants';
@@ -421,6 +421,7 @@ function Trainer({ user }) {
   /* ---------- system prompt builder ---------- */
   const buildSystem = useCallback((m, diff, pIdx) => {
     if (m === 'drill') return SYSTEM_DRILL + '\n\n' + DRILL_DIFF[diff];
+    if (m === 'raja') return SYSTEM_RAJA;
     return SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff] + '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
   }, []);
 
@@ -683,6 +684,12 @@ function Trainer({ user }) {
               <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
               <div style={S.cardTag}>PATTERN RECOGNITION</div>
             </button>
+            <button style={S.card} onClick={() => startSession('raja', difficulty)}>
+              <div style={S.cardIcon}>🧑‍🏫</div>
+              <div style={S.cardTitle}>LEARN FROM RAJA</div>
+              <div style={S.cardDesc}>Flip the script. Raja, a master rep, runs the call and YOU play the client. Feel elite discovery, the WHY, and objection handling done right.</div>
+              <div style={S.cardTag}>WATCH THE MASTER</div>
+            </button>
           </div>
 
           <button style={S.historyLink} onClick={openHistory}>📊 History &amp; Patterns</button>
@@ -773,7 +780,7 @@ function Trainer({ user }) {
                       <div style={S.sessionTop} onClick={() => setExpanded(isOpen ? null : s.id)}>
                         <div style={S.sessionLeft}>
                           <span style={{ ...S.modePill, background: s.mode === 'drill' ? '#3A2A4A' : '#2A3A4A' }}>
-                            {s.mode === 'drill' ? 'GAUNTLET' : 'PROSPECT'}
+                            {s.mode === 'drill' ? 'GAUNTLET' : s.mode === 'raja' ? 'RAJA' : 'PROSPECT'}
                           </span>
                           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
                           {s.prospectName && <span style={S.prospectTag}>{s.prospectName}</span>}
@@ -789,7 +796,7 @@ function Trainer({ user }) {
                           {s.messages.map((m, i) => (
                             <div key={i} style={S.tLine}>
                               <span style={{ ...S.tWho, color: m.role === 'user' ? '#6FA8DC' : '#D4A843' }}>
-                                {m.role === 'user' ? 'YOU' : (s.mode === 'drill' ? 'DRILL' : s.prospectName || 'PROSPECT')}
+                                {m.role === 'user' ? 'YOU' : (s.mode === 'drill' ? 'DRILL' : s.mode === 'raja' ? 'RAJA' : s.prospectName || 'PROSPECT')}
                               </span>
                               <span style={S.tText}>{m.content}</span>
                             </div>
@@ -823,7 +830,7 @@ function Trainer({ user }) {
       <div style={S.header}>
         <button style={S.backBtn} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
         <div style={S.headerCenter}>
-          <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : 'THE GAUNTLET'}</span>
+          <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : mode === 'raja' ? 'LEARN FROM RAJA' : 'THE GAUNTLET'}</span>
           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
           <span style={S.timerBadge}>{formatTime(elapsed)}</span>
           {mode === 'drill' && rounds.length > 0 && (
@@ -888,7 +895,7 @@ function Trainer({ user }) {
               <button style={S.testVoiceBtn} onClick={testCalibVoice}>▶ Test</button>
               {calib.done && <button style={S.calibResetBtn} onClick={resetCalib}>Reset</button>}
             </div>
-            <button style={S.restartBtn} onClick={() => startSession(mode, difficulty)}>{mode === 'roleplay' ? 'New prospect' : 'Restart drill'}</button>
+            <button style={S.restartBtn} onClick={() => startSession(mode, difficulty)}>{mode === 'roleplay' ? 'New prospect' : mode === 'raja' ? 'Restart with Raja' : 'Restart drill'}</button>
           </div>
         )}
       </div>
@@ -960,7 +967,7 @@ function Trainer({ user }) {
             <div style={{ ...S.msgBubble, ...(m.role === 'user' ? S.userBubble : S.botBubble) }}>
               {m.role === 'assistant' && (
                 <div style={S.speakerLabel}>
-                  {mode === 'roleplay' ? prospect.name.toUpperCase() : 'PROSPECT'}
+                  {mode === 'roleplay' ? prospect.name.toUpperCase() : mode === 'raja' ? 'RAJA' : 'PROSPECT'}
                 </div>
               )}
               <div style={S.msgText}>{m.content}</div>
@@ -1070,19 +1077,21 @@ function Trainer({ user }) {
       )}
 
       <div style={S.actionBar}>
-        <div style={S.hintWrap}>
-          <button style={S.hintTrigger} onClick={() => setHintMenu((o) => !o)}>💡 Hint ▾</button>
-          {hintMenu && (
-            <div style={S.hintMenuPop}>
-              <button style={S.hintOption} onClick={() => getHint('strategy')}>
-                <b>Strategy</b><span style={S.hintOptDesc}>Which tool / phase to run now</span>
-              </button>
-              <button style={S.hintOption} onClick={() => getHint('words')}>
-                <b>Exact words</b><span style={S.hintOptDesc}>A line to say next</span>
-              </button>
-            </div>
-          )}
-        </div>
+        {mode !== 'raja' && (
+          <div style={S.hintWrap}>
+            <button style={S.hintTrigger} onClick={() => setHintMenu((o) => !o)}>💡 Hint ▾</button>
+            {hintMenu && (
+              <div style={S.hintMenuPop}>
+                <button style={S.hintOption} onClick={() => getHint('strategy')}>
+                  <b>Strategy</b><span style={S.hintOptDesc}>Which tool / phase to run now</span>
+                </button>
+                <button style={S.hintOption} onClick={() => getHint('words')}>
+                  <b>Exact words</b><span style={S.hintOptDesc}>A line to say next</span>
+                </button>
+              </div>
+            )}
+          </div>
+        )}
         {mode === 'roleplay' && messages.length >= 4 && !showDebrief && (
           <button style={S.debriefBtn} onClick={runDebrief}>📋 End &amp; Debrief</button>
         )}
