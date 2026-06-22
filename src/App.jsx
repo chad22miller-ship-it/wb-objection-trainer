@@ -138,6 +138,7 @@ function Trainer({ user }) {
   const difficultyRef = useRef(3);
   const profileIdxRef = useRef(0);
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
+  const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
@@ -429,7 +430,14 @@ function Trainer({ user }) {
   /* ---------- system prompt builder ---------- */
   const buildSystem = useCallback((m, diff, pIdx) => {
     if (m === 'drill') return SYSTEM_DRILL + '\n\n' + DRILL_DIFF[diff];
-    if (m === 'raja') return SYSTEM_RAJA;
+    if (m === 'raja') {
+      let sys = SYSTEM_RAJA;
+      if (seedRef.current) {
+        // Replaying a Prospect call: Raja now sells the SAME client the trainee just practiced on.
+        sys += '\n\nSEEDED CLIENT — the person you are calling is the SAME client from the prior call below, where a trainee rep was practicing on them. Their situation and the WHY that came up are in the transcript. Run YOUR masterful call on this same client: greet them warmly and draw out their story and deep WHY through your invitational, "tell me more" style — demonstrate how a master uncovers what the trainee was reaching for. The user is now playing this client.\n\nPRIOR CALL (the client is the PROSPECT in it):\n' + seedRef.current;
+      }
+      return sys;
+    }
     let sys = SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff];
     if (seedRef.current) {
       // Replaying a Raja call: BE the same client, now the trainee runs discovery.
@@ -473,6 +481,7 @@ function Trainer({ user }) {
 
     seedRef.current = seed || null;
     setIsSeeded(!!seed);
+    offTrackHelpedRef.current = false;
 
     sessionRef.current = {
       id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
@@ -598,6 +607,13 @@ function Trainer({ user }) {
     startSession('roleplay', difficulty, seed);
   };
 
+  // Switch roles out of a Prospect call: Raja now sells the SAME prospect (you play the client).
+  const switchRolesFromRoleplay = () => {
+    const seed = messagesRef.current
+      .map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
+    startSession('raja', difficulty, seed);
+  };
+
   /* ---------- hints ---------- */
   const getHint = useCallback(async (type) => {
     setHintType(type); setHintLoading(true); setHintText(''); setHintOpen(true); setHintMenu(false);
@@ -612,6 +628,18 @@ function Trainer({ user }) {
     }
     setHintLoading(false);
   }, [mode]);
+
+  // Auto-pop a strategy hint the moment the rep is clearly off track (roleplay only).
+  useEffect(() => {
+    if (mode !== 'roleplay' || loading) return;
+    const repTurns = messages.filter((m) => m.role === 'user').length;
+    const offTrack = repTurns >= 3 && whyProgress <= 2;
+    if (offTrack && !offTrackHelpedRef.current && !hintOpen) {
+      offTrackHelpedRef.current = true;
+      getHint('strategy');
+    }
+    if (whyProgress > 2) offTrackHelpedRef.current = false;
+  }, [messages, whyProgress, mode, loading, hintOpen, getHint]);
 
   const insertSelection = useCallback(() => {
     const sel = (typeof window !== 'undefined' && window.getSelection) ? window.getSelection().toString().trim() : '';
@@ -1131,8 +1159,8 @@ function Trainer({ user }) {
                 )}
                 <div style={S.debriefActions}>
                   {flipMode(mode) && (
-                    <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : startSession('raja', difficulty)}>
-                      🔄 Switch roles — {mode === 'raja' ? 'now YOU run this same call' : 'watch Raja run it'}
+                    <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : switchRolesFromRoleplay()}>
+                      🔄 Switch roles — {mode === 'raja' ? 'now YOU run this same call' : 'watch Raja run this same client'}
                     </button>
                   )}
                   <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty)}>↻ Run it again</button>
