@@ -1,7 +1,17 @@
 // Vercel serverless function — returns all reps' sessions for the admin dashboard.
-// Protected by a PIN code. Calls a Supabase RPC function (get_all_sessions) that bypasses RLS.
+// Protected by: (1) a verified Supabase session whose email is on the ADMIN_EMAIL
+// allowlist, and (2) a PIN as a second factor (constant-time compare).
+// Calls a Supabase RPC (get_all_sessions) that bypasses RLS, so this gate matters.
 
 import { createClient } from '@supabase/supabase-js';
+import crypto from 'node:crypto';
+
+function safeEqual(a, b) {
+  const ba = Buffer.from(String(a ?? ''));
+  const bb = Buffer.from(String(b ?? ''));
+  if (ba.length !== bb.length) return false;
+  return crypto.timingSafeEqual(ba, bb);
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
@@ -19,15 +29,33 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: 'Supabase service credentials not configured' });
   }
 
+  const adminEmails = (process.env.ADMIN_EMAIL || '')
+    .split(',').map((e) => e.trim().toLowerCase()).filter(Boolean);
+
   try {
-    const { pin } = req.body;
-    if (!pin || pin !== adminPin) {
+    const { pin } = req.body || {};
+    const serviceClient = createClient(supabaseUrl, supabaseServiceKey);
+
+    // 1. Identity gate: require a valid logged-in Supabase session whose email is
+    //    on the allowlist. (Skipped only if ADMIN_EMAIL is unset, to avoid lockout.)
+    if (adminEmails.length) {
+      const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
+      if (!token) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+      const { data: userData, error: authErr } = await serviceClient.auth.getUser(token);
+      const email = userData?.user?.email?.toLowerCase();
+      if (authErr || !email || !adminEmails.includes(email)) {
+        return res.status(403).json({ error: 'Not authorized' });
+      }
+    }
+
+    // 2. Second factor: the PIN (constant-time compare).
+    if (!safeEqual(pin, adminPin)) {
       return res.status(403).json({ error: 'Wrong PIN' });
     }
 
-    const serviceClient = createClient(supabaseUrl, supabaseServiceKey);
     const { data, error } = await serviceClient.rpc('get_all_sessions');
-
     if (error) {
       console.error('Admin RPC error:', error);
       return res.status(500).json({ error: 'Failed to fetch sessions' });

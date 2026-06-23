@@ -100,6 +100,7 @@ function Trainer({ user }) {
   const [showCongrats, setShowCongrats] = useState(false);
   const [drillProgress, setDrillProgress] = useState(0);
   const [isSeeded, setIsSeeded] = useState(false); // roleplay seeded with a prior Raja call
+  const [apiError, setApiError] = useState(''); // transient banner for a failed AI request
 
   // API usage stats
   const [apiUsage, setApiUsage] = useState(null);
@@ -139,6 +140,7 @@ function Trainer({ user }) {
   const profileIdxRef = useRef(0);
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
+  const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
@@ -452,14 +454,20 @@ function Trainer({ user }) {
   const saveSession = useCallback(async (msgs, rnds, extra = {}) => {
     const meta = sessionRef.current;
     if (!meta.id) return;
+    // Once a debrief has been saved for this session, keep it on every later write so a
+    // racing turn-save can't silently drop it (store.set is a full overwrite, not a merge).
+    const keepDebrief = (extra.debrief == null && meta.debrief != null)
+      ? { debrief: meta.debrief, debriefScores: meta.debriefScores } : {};
     await store.set(meta.id, {
       id: meta.id, startedAt: meta.startedAt, mode: meta.mode, difficulty: meta.difficulty,
       profileIdx: meta.profileIdx,
       prospectName: meta.prospectName,
       prospectVibe: meta.prospectVibe,
       messages: msgs, rounds: rnds,
+      ...keepDebrief,
       ...extra,
     });
+    if (extra.debrief != null) { meta.debrief = extra.debrief; meta.debriefScores = extra.debriefScores; }
   }, []);
 
   /* ---------- session timer ---------- */
@@ -485,13 +493,17 @@ function Trainer({ user }) {
 
     sessionRef.current = {
       id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
-      profileIdx: pIdx, prospectName: prospect.name, prospectVibe: prospect.vibe,
+      profileIdx: pIdx,
+      // When seeded (replaying a prior call) the random profile name is irrelevant — don't store it.
+      prospectName: seed ? null : prospect.name,
+      prospectVibe: seed ? null : prospect.vibe,
     };
 
     setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
     setMessages([]); setRounds([]); setInput('');
     setHintOpen(false); setHintMenu(false); setHintText(''); setSettingsOpen(false);
-    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false); setDrillProgress(0);
+    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false); setDrillProgress(0); setApiError('');
+    debriefRunningRef.current = false;
     setLoading(true); startTimer();
 
     if (m === 'roleplay') {
@@ -500,9 +512,14 @@ function Trainer({ user }) {
       setMessages([]);
       setLoading(false);
     } else {
-      const reply = await callAPI([{ role: 'user', content: "I'm ready. Let's go." }], buildSystem(m, diff, pIdx));
-      const msgs = [{ role: 'assistant', content: reply }];
-      setMessages(msgs); await saveSession(msgs, []); speak(reply);
+      const result = await callAPI([{ role: 'user', content: "I'm ready. Let's go." }], buildSystem(m, diff, pIdx));
+      if (result.ok) {
+        const opener = stripProgressTags(result.text).clean;
+        const msgs = [{ role: 'assistant', content: opener }];
+        setMessages(msgs); await saveSession(msgs, []); speak(opener);
+      } else {
+        setApiError(result.error || 'Could not start the session. Try again.');
+      }
       setLoading(false);
     }
   }, [buildSystem, saveSession, speak, stopSpeaking, startTimer, stopTimer]);
@@ -522,17 +539,29 @@ function Trainer({ user }) {
     const t = (text || '').trim();
     if (!t) return null;
     stopSpeaking();
+    setApiError('');
 
+    const sid = sessionRef.current.id;
     const curMsgs = messagesRef.current;
     const userMsg = { role: 'user', content: t };
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
-    let reply = await callAPI(
+    const result = await callAPI(
       newMsgs.map((m) => ({ role: m.role, content: m.content })),
       buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current)
     );
 
+    // Drop the reply if the session was switched/restarted mid-request (stale-write guard).
+    if (sessionRef.current.id !== sid) return null;
+    // Real failure: surface it, don't store/speak/persist an error as a prospect turn.
+    if (!result.ok) {
+      setApiError(result.error || 'Something went wrong. Try again.');
+      setLoading(false);
+      return null;
+    }
+
+    let reply = result.text;
     const { clean, whyScore, drillScore } = stripProgressTags(reply);
     reply = clean;
     if (modeRef.current === 'roleplay' && whyScore != null) {
@@ -570,6 +599,8 @@ function Trainer({ user }) {
 
   /* ---------- roleplay debrief ---------- */
   const runDebrief = useCallback(async () => {
+    if (debriefRunningRef.current) return; // synchronous re-entry guard (double-click / two End buttons)
+    debriefRunningRef.current = true;
     stopTimer();
     setDebriefLoading(true); setShowDebrief(true); setDebriefText(''); setDebriefScores(null);
     const isRaja = modeRef.current === 'raja';
@@ -577,23 +608,34 @@ function Trainer({ user }) {
       .map((m) => isRaja
         ? `${m.role === 'user' ? 'CLIENT' : 'RAJA'}: ${m.content}`
         : `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
-    const reply = await callAPI(
-      [{ role: 'user', content: isRaja
-          ? `Transcript of Raja's call (the trainee played the client):\n\n${transcript}\n\nRecap it for the trainee.`
-          : `Full roleplay transcript:\n\n${transcript}\n\nDebrief this rep.` }],
-      isRaja ? SYSTEM_RAJA_RECAP : SYSTEM_DEBRIEF
-    );
-    setDebriefText(reply);
-    const scores = isRaja ? null : parseDebriefScores(reply);
-    setDebriefScores(scores);
-    await saveSession(messagesRef.current, roundsRef.current, { debrief: reply, debriefScores: scores });
-    setDebriefLoading(false);
+    try {
+      const result = await callAPI(
+        [{ role: 'user', content: isRaja
+            ? `Transcript of Raja's call (the trainee played the client):\n\n${transcript}\n\nRecap it for the trainee.`
+            : `Full roleplay transcript:\n\n${transcript}\n\nDebrief this rep.` }],
+        isRaja ? SYSTEM_RAJA_RECAP : SYSTEM_DEBRIEF
+      );
+      if (!result.ok) {
+        setDebriefText('⚠️ ' + (result.error || 'Could not generate the debrief. Try again.'));
+        return;
+      }
+      const reply = result.text;
+      setDebriefText(reply);
+      const scores = isRaja ? null : parseDebriefScores(reply);
+      setDebriefScores(scores);
+      await saveSession(messagesRef.current, roundsRef.current, { debrief: reply, debriefScores: scores });
+    } finally {
+      setDebriefLoading(false);
+      debriefRunningRef.current = false;
+    }
   }, [saveSession, stopTimer]);
 
   // End the live call and, if there's a real conversation, auto-open the debrief.
+  // Gate on completed USER turns so the seeded assistant opener (raja/drill) doesn't skew the count.
   const endCallAndDebrief = () => {
     endCall();
-    if (messagesRef.current.length >= 4 && !showDebrief) runDebrief();
+    const userTurns = messagesRef.current.filter((m) => m.role === 'user').length;
+    if (userTurns >= 2 && !showDebrief) runDebrief();
   };
 
   // Raja <-> Prospect are mirror roles; this returns the flipped mode (null for drill).
@@ -615,18 +657,18 @@ function Trainer({ user }) {
   };
 
   /* ---------- hints ---------- */
+  const hintLoadingRef = useRef(false);
   const getHint = useCallback(async (type) => {
+    if (hintLoadingRef.current) return; // in-flight guard: no overlapping/stacked hint requests
+    hintLoadingRef.current = true;
     setHintType(type); setHintLoading(true); setHintText(''); setHintOpen(true); setHintMenu(false);
     const transcript = messagesRef.current
       .map((m) => `${m.role === 'user' ? 'REP' : (mode === 'roleplay' ? 'PROSPECT' : 'DRILL')}: ${m.content}`).join('\n\n');
     const sys = type === 'strategy' ? HINT_STRATEGY : HINT_WORDS;
-    try {
-      const reply = await callAPI([{ role: 'user', content: `Transcript so far:\n\n${transcript || '(conversation just started)'}\n\nGive me the hint.` }], sys);
-      setHintText(reply || 'No hint available. Try again.');
-    } catch (e) {
-      setHintText('Hint failed. Try again.');
-    }
+    const result = await callAPI([{ role: 'user', content: `Transcript so far:\n\n${transcript || '(conversation just started)'}\n\nGive me the hint.` }], sys);
+    setHintText(result.ok ? result.text : ('⚠️ ' + (result.error || 'Hint failed. Try again.')));
     setHintLoading(false);
+    hintLoadingRef.current = false;
   }, [mode]);
 
   // Auto-pop a strategy hint the moment the rep is clearly off track (roleplay only).
@@ -681,8 +723,9 @@ function Trainer({ user }) {
         .map((m) => `${m.role === 'user' ? 'REP' : 'OTHER'}: ${m.content}`).join('\n').slice(0, 3000);
       return `--- SESSION ${i + 1} (${s.mode}, difficulty ${s.difficulty}) ---\n${t}`;
     }).join('\n\n');
-    const reply = await callAPI([{ role: 'user', content: `Practice history:\n\n${compiled}\n\nGive me the pattern.` }], PATTERN_PROMPT);
-    setPatternText(reply); setPatternLoading(false);
+    const result = await callAPI([{ role: 'user', content: `Practice history:\n\n${compiled}\n\nGive me the pattern.` }], PATTERN_PROMPT);
+    setPatternText(result.ok ? result.text : ('⚠️ ' + (result.error || 'Could not analyze your history. Try again.')));
+    setPatternLoading(false);
   }, [history]);
 
   const handleLogout = useCallback(async () => {
@@ -708,22 +751,33 @@ function Trainer({ user }) {
   };
 
   /* ---------- Redempter: coach a real objection or transcript ---------- */
+  const REDEMPTER_CAP = 100000; // single source of truth for the input cap
   const handleRedempterFile = (e) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => setRedempterInput(String(reader.result || '').slice(0, 200000));
-    reader.readAsText(file);
     e.target.value = '';
+    if (file.size > 3_000_000) {
+      setRedempterResult('⚠️ That file is too large (over 3 MB). Please paste the transcript text, or use a smaller file.');
+      return;
+    }
+    const reader = new FileReader();
+    reader.onload = () => setRedempterInput(String(reader.result || '').slice(0, REDEMPTER_CAP));
+    reader.onerror = () => setRedempterResult('⚠️ Could not read that file. Please paste the transcript text instead.');
+    reader.readAsText(file.slice(0, 3_000_000));
   };
 
   const runRedempter = async (overrideText) => {
-    const text = (typeof overrideText === 'string' ? overrideText : redempterInput).trim();
+    let text = (typeof overrideText === 'string' ? overrideText : redempterInput).trim();
     if (!text || redempterLoading) return;
+    const truncated = text.length > REDEMPTER_CAP;
+    text = text.slice(0, REDEMPTER_CAP);
     setRedempterLoading(true);
     setRedempterResult('');
-    const reply = await callAPI([{ role: 'user', content: text.slice(0, 100000) }], SYSTEM_REDEMPTER, { timeoutMs: 120000 });
-    setRedempterResult(reply);
+    // Fence the paste so embedded "ignore your instructions" text is treated as data, not commands.
+    const note = truncated ? '\n\n(Note: this call was long; only the first part is shown above.)' : '';
+    const content = `<call_transcript>\n${text}\n</call_transcript>${note}`;
+    const result = await callAPI([{ role: 'user', content }], SYSTEM_REDEMPTER, { timeoutMs: 120000 });
+    setRedempterResult(result.ok ? result.text : ('⚠️ ' + (result.error || 'Could not analyze that. Try again.')));
     setRedempterLoading(false);
   };
 
@@ -1011,7 +1065,7 @@ function Trainer({ user }) {
             <div style={S.settingLabel}>DIFFICULTY</div>
             <div style={S.diffMini}>
               {DIFFICULTY_META.map((dm) => (
-                <button key={dm.level} onClick={() => startSession(mode, dm.level)}
+                <button key={dm.level} onClick={() => startSession(mode, dm.level, isSeeded ? seedRef.current : null)}
                   style={{ ...S.diffMiniBtn, borderColor: difficulty === dm.level ? dm.color : '#2A3A4A', background: difficulty === dm.level ? dm.color : 'transparent', color: difficulty === dm.level ? '#0F1419' : '#8899A6' }}>
                   {dm.level}
                 </button>
@@ -1039,7 +1093,7 @@ function Trainer({ user }) {
               <button style={S.testVoiceBtn} onClick={testCalibVoice}>▶ Test</button>
               {calib.done && <button style={S.calibResetBtn} onClick={resetCalib}>Reset</button>}
             </div>
-            <button style={S.restartBtn} onClick={() => startSession(mode, difficulty)}>{mode === 'roleplay' ? 'New prospect' : mode === 'raja' ? 'Restart with Raja' : 'Restart drill'}</button>
+            <button style={S.restartBtn} onClick={() => startSession(mode, difficulty, isSeeded ? seedRef.current : null)}>{isSeeded ? 'Restart (same client)' : mode === 'roleplay' ? 'New prospect' : mode === 'raja' ? 'Restart with Raja' : 'Restart drill'}</button>
           </div>
         )}
       </div>
@@ -1096,6 +1150,13 @@ function Trainer({ user }) {
         </div>
       )}
 
+      {apiError && (
+        <div style={S.apiErrorBar}>
+          <span>{apiError}</span>
+          <button style={S.apiErrorClose} onClick={() => setApiError('')}>✕</button>
+        </div>
+      )}
+
       <div style={S.chatArea} onClick={() => settingsOpen && setSettingsOpen(false)}>
         {/* FIX #2: Roleplay shows prospect info and prompts rep to open */}
         {mode === 'roleplay' && noMessages && !loading && (
@@ -1121,7 +1182,7 @@ function Trainer({ user }) {
             <div style={{ ...S.msgBubble, ...(m.role === 'user' ? S.userBubble : S.botBubble) }}>
               {m.role === 'assistant' && (
                 <div style={S.speakerLabel}>
-                  {mode === 'roleplay' ? prospect.name.toUpperCase() : mode === 'raja' ? 'RAJA' : 'PROSPECT'}
+                  {mode === 'roleplay' ? (isSeeded ? 'CLIENT' : prospect.name.toUpperCase()) : mode === 'raja' ? 'RAJA' : 'PROSPECT'}
                 </div>
               )}
               <div style={S.msgText}>{m.content}</div>
@@ -1163,7 +1224,7 @@ function Trainer({ user }) {
                       🔄 Switch roles — {mode === 'raja' ? 'now YOU run this same call' : 'watch Raja run this same client'}
                     </button>
                   )}
-                  <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty)}>↻ Run it again</button>
+                  <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty, isSeeded ? seedRef.current : null)}>↻ Run it again</button>
                   <button style={S.debriefActionGhost} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>🏠 New session</button>
                 </div>
               </>
@@ -1286,7 +1347,7 @@ function Trainer({ user }) {
           {messages.filter((m) => m.role === 'user').length >= 3 && whyProgress <= 2 ? (
             <div style={S.offTrackBox}>
               <span style={S.offTrackLabel}>⚠️ Off track — you haven't gotten near their WHY.</span>
-              <button style={S.offTrackBtn} onClick={() => getHint('strategy')}>💡 What would Raja do?</button>
+              <button style={{ ...S.offTrackBtn, opacity: hintLoading ? 0.5 : 1 }} disabled={hintLoading} onClick={() => getHint('strategy')}>💡 What would Raja do?</button>
             </div>
           ) : (
             <div style={S.whyBarHint}>
@@ -1480,6 +1541,8 @@ const S = {
   offTrackBox: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 4, padding: '6px 10px', background: '#2A1414', border: '1px solid #5A2A2A', borderRadius: 8 },
   offTrackLabel: { fontSize: 11, color: '#E0A8A8', fontWeight: 600, lineHeight: 1.3 },
   offTrackBtn: { flexShrink: 0, background: '#D4A843', border: 'none', color: '#0F1419', fontSize: 11, fontWeight: 700, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
+  apiErrorBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, margin: '0 16px', padding: '8px 12px', background: '#2A1414', border: '1px solid #5A2A2A', borderRadius: 8, color: '#E0A8A8', fontSize: 12, fontWeight: 600 },
+  apiErrorClose: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 13, flexShrink: 0 },
   hintWrap: { position: 'relative', zIndex: 20 },
   hintTrigger: { background: '#1F2A1A', border: '1px solid #4A5A2A', color: '#A8C843', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   hintMenuPop: { position: 'absolute', bottom: 38, left: 0, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, overflow: 'hidden', width: 220, zIndex: 15, boxShadow: '0 8px 24px rgba(0,0,0,.4)' },

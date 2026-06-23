@@ -1,5 +1,6 @@
 import { useState, useCallback } from 'react';
 import { DIFFICULTY_META } from '../constants';
+import { supabase } from '../lib/supabase';
 
 const diffMeta = (n) => DIFFICULTY_META[n - 1] || DIFFICULTY_META[2];
 
@@ -16,9 +17,17 @@ export default function Admin({ onBack }) {
     setLoading(true);
     setError('');
     try {
+      let token = '';
+      try {
+        const { data } = await supabase.auth.getSession();
+        token = data?.session?.access_token || '';
+      } catch (e) { /* not signed in */ }
       const res = await fetch('/api/admin', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
         body: JSON.stringify({ pin: code }),
       });
 

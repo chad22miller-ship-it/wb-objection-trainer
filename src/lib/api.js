@@ -1,9 +1,12 @@
 // All API calls go through /api/chat (the Vercel serverless function).
 // The API key never touches the browser.
-// Auto-retries on 429 (rate limit) up to 3 times with backoff.
+// Returns a structured result so callers can distinguish a real reply from a
+// failure: { ok: true, text } on success, { ok: false, error, status } on failure.
+// Auto-retries on 429 and transient 5xx up to 3 times with backoff.
 
 export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
   const maxRetries = 3;
+  let lastError = 'Connection error. Try again.';
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
@@ -16,7 +19,7 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
         signal: controller.signal,
         body: JSON.stringify({
           system,
-          messages: msgs.map((m) => ({ role: m.role, content: m.content })),
+          messages: (msgs || []).map((m) => ({ role: m.role, content: m.content })),
         }),
       });
 
@@ -24,24 +27,33 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
 
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
-        if (res.status === 429 && attempt < maxRetries) {
-          await new Promise((r) => setTimeout(r, (attempt + 1) * 5000));
+        // 429 (busy) and transient 5xx (incl. the empty-reply 502 guard) are retryable.
+        if ((res.status === 429 || res.status >= 500) && attempt < maxRetries) {
+          await new Promise((r) => setTimeout(r, (attempt + 1) * 3000));
           continue;
         }
         console.error('API error:', res.status, err);
-        if (res.status === 429) return '⚠️ AI is rate-limited (too many requests). Wait 30 seconds and try again.';
-        if (res.status === 401) return '⚠️ AI key problem — ask your team lead to check the API keys.';
-        if (res.status === 408) return 'AI timed out. Try again.';
-        return err.error || 'Connection error. Try again.';
+        const error = res.status === 429 ? '⚠️ AI is busy right now. Wait a moment and try again.'
+          : res.status === 401 ? '⚠️ AI key problem — ask your team lead to check the API keys.'
+          : res.status === 408 ? 'AI timed out. Try again.'
+          : (err.error || 'Connection error. Try again.');
+        return { ok: false, error, status: res.status };
       }
 
       const data = await res.json();
-      return data.content?.find((b) => b.type === 'text')?.text || '...';
+      const text = data.content?.find((b) => b.type === 'text')?.text || '';
+      if (!text) {
+        // Treat an empty success body like a transient miss so we don't surface a blank turn.
+        if (attempt < maxRetries) { await new Promise((r) => setTimeout(r, (attempt + 1) * 3000)); continue; }
+        return { ok: false, error: 'AI gave an empty reply. Try again.', status: 502 };
+      }
+      return { ok: true, text };
     } catch (err) {
       clearTimeout(timer);
-      if (err.name === 'AbortError') return 'Request timed out. Try again.';
+      lastError = err.name === 'AbortError' ? 'Request timed out. Try again.' : 'Connection error. Try again.';
       console.error('API fetch error:', err);
-      return 'Connection error. Try again.';
+      return { ok: false, error: lastError, status: 0 };
     }
   }
+  return { ok: false, error: lastError, status: 0 };
 }

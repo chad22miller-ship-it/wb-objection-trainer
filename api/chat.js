@@ -20,14 +20,12 @@ async function callGemini(apiKey, body) {
       signal: ac.signal,
     });
     clearTimeout(timer);
-    const data = await res.json();
-    if (res.ok) {
-      const text = data.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
-      // Empty text (e.g. budget eaten by thinking, or a safety block) => treat as a
-      // miss so the failover loop moves on instead of returning a blank reply.
-      return text ? { ok: true, text } : { ok: false, status: 502 };
-    }
-    return { ok: false, status: res.status };
+    if (!res.ok) return { ok: false, status: res.status };
+    const data = await res.json().catch(() => null);
+    const text = data?.candidates?.[0]?.content?.parts?.map((p) => p.text).join('') || '';
+    // Empty text (e.g. budget eaten by thinking, or a safety block) => treat as a
+    // miss so the failover loop moves on instead of returning a blank reply.
+    return text ? { ok: true, text } : { ok: false, status: 502 };
   } catch (err) {
     clearTimeout(timer);
     return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
@@ -48,12 +46,10 @@ async function callGroq(apiKey, system, messages, max_tokens) {
       signal: ac.signal,
     });
     clearTimeout(timer);
-    const data = await res.json();
-    if (res.ok) {
-      const text = data.choices?.[0]?.message?.content || '';
-      return { ok: true, text };
-    }
-    return { ok: false, status: res.status };
+    if (!res.ok) return { ok: false, status: res.status };
+    const data = await res.json().catch(() => null);
+    const text = data?.choices?.[0]?.message?.content || '';
+    return text ? { ok: true, text } : { ok: false, status: 502 };
   } catch (err) {
     clearTimeout(timer);
     return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
@@ -78,12 +74,10 @@ async function callOpenRouter(apiKey, system, messages, max_tokens) {
       signal: ac.signal,
     });
     clearTimeout(timer);
-    const data = await res.json();
-    if (res.ok) {
-      const text = data.choices?.[0]?.message?.content || '';
-      return { ok: true, text };
-    }
-    return { ok: false, status: res.status };
+    if (!res.ok) return { ok: false, status: res.status };
+    const data = await res.json().catch(() => null);
+    const text = data?.choices?.[0]?.message?.content || '';
+    return text ? { ok: true, text } : { ok: false, status: 502 };
   } catch (err) {
     clearTimeout(timer);
     return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
@@ -110,15 +104,13 @@ async function callAnthropic(apiKey, system, messages, max_tokens) {
       signal: ac.signal,
     });
     clearTimeout(timer);
-    const data = await res.json();
-    if (res.ok) {
-      const text = data.content?.find((b) => b.type === 'text')?.text || '';
-      return { ok: true, text };
-    }
-    return { ok: false, status: res.status };
+    if (!res.ok) return { ok: false, status: res.status };
+    const data = await res.json().catch(() => null);
+    const text = data?.content?.find((b) => b.type === 'text')?.text || '';
+    return text ? { ok: true, text } : { ok: false, status: 502 };
   } catch (err) {
     clearTimeout(timer);
-    return { ok: false, status: 500 };
+    return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
   }
 }
 
@@ -187,10 +179,31 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { system, messages, max_tokens = 2048 } = req.body;
+    const body = req.body || {};
+    const { system } = body;
+    const messages = body.messages;
+
+    // --- Input validation (reject abusive/malformed payloads with a clean 400) ---
+    if (!Array.isArray(messages)) {
+      return res.status(400).json({ error: 'messages must be an array' });
+    }
+    if (messages.length > 80) {
+      return res.status(400).json({ error: 'too many messages' });
+    }
+    if (system != null && typeof system !== 'string') {
+      return res.status(400).json({ error: 'system must be a string' });
+    }
+    // Cap total payload so a huge paste/transcript can't be used to burn quota.
+    const approxSize = (system ? system.length : 0) +
+      messages.reduce((n, m) => n + (typeof m?.content === 'string' ? m.content.length : 0), 0);
+    if (approxSize > 200000) {
+      return res.status(413).json({ error: 'request too large' });
+    }
+    // Clamp output tokens to a sane ceiling regardless of what the client asked for.
+    const max_tokens = Math.min(Math.max(Number(body.max_tokens) || 2048, 1), 4096);
 
     // --- Build Gemini body ---
-    const contents = (messages || []).map((m) => ({
+    const contents = messages.map((m) => ({
       role: m.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: typeof m.content === 'string' ? m.content : '' }],
     }));
