@@ -8,6 +8,8 @@ export default function Admin({ onBack }) {
   const [pin, setPin] = useState('');
   const [unlocked, setUnlocked] = useState(false);
   const [sessions, setSessions] = useState([]);
+  const [users, setUsers] = useState([]);
+  const [tab, setTab] = useState('reps');
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [expandedRep, setExpandedRep] = useState(null);
@@ -45,6 +47,7 @@ export default function Admin({ onBack }) {
 
       const data = await res.json();
       setSessions(data.sessions || []);
+      setUsers(data.users || []);
       setUnlocked(true);
     } catch (err) {
       setError('Failed to load data');
@@ -108,6 +111,9 @@ export default function Admin({ onBack }) {
   });
 
   repList.sort((a, b) => (b.lastActive || '').localeCompare(a.lastActive || ''));
+
+  const practicedIds = new Set(sessions.map((s) => s.user_id));
+  const signins = [...users].sort((a, b) => (b.lastSignIn || '').localeCompare(a.lastSignIn || ''));
 
   const teamAvg = repList.length
     ? repList.reduce((sum, r) => sum + (r.drillAvg || 0), 0) / repList.filter((r) => r.drillAvg).length || 0
@@ -188,6 +194,33 @@ export default function Admin({ onBack }) {
       </div>
 
       <div style={S.scroll}>
+        <div style={S.tabBar}>
+          <button style={tab === 'reps' ? S.tabActive : S.tab} onClick={() => setTab('reps')}>📊 Practice ({repList.length})</button>
+          <button style={tab === 'signins' ? S.tabActive : S.tab} onClick={() => setTab('signins')}>👤 Sign-ins ({users.length})</button>
+        </div>
+
+        {tab === 'signins' && (
+          <div style={S.signinList}>
+            {signins.length === 0 && <div style={S.empty}>No accounts yet.</div>}
+            {signins.map((u) => (
+              <div key={u.id} style={S.signinRow}>
+                <div style={S.signinLeft}>
+                  <div style={S.signinName}>{u.name || '(no name)'}</div>
+                  <div style={S.signinEmail}>{u.email}</div>
+                </div>
+                <div style={S.signinRight}>
+                  <div style={S.signinMeta}>Last login: {u.lastSignIn ? new Date(u.lastSignIn).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' }) : 'never'}</div>
+                  <div style={S.signinSub}>
+                    Joined {new Date(u.createdAt).toLocaleDateString()}
+                    {!practicedIds.has(u.id) && <span style={S.signinFlag}> · hasn’t practiced</span>}
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === 'reps' && (<>
         {/* Team stats */}
         <div style={S.statsRow}>
           <div style={S.statCard}>
@@ -337,6 +370,7 @@ export default function Admin({ onBack }) {
             </div>
           );
         })}
+        </>)}
       </div>
     </div>
   );
@@ -358,6 +392,19 @@ const S = {
   errorBox: { color: '#E53935', fontSize: 14, padding: '12px 20px', background: '#1A1414', border: '1px solid #4A2A2A', borderRadius: 8 },
   retryBtn: { background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
   scroll: { flex: 1, overflowY: 'auto', padding: 16 },
+
+  tabBar: { display: 'flex', gap: 8, marginBottom: 16 },
+  tab: { flex: 1, background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, fontWeight: 700, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
+  tabActive: { flex: 1, background: '#D4A843', border: '1px solid #D4A843', color: '#0F1419', fontSize: 12, fontWeight: 700, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
+  signinList: { display: 'flex', flexDirection: 'column', gap: 8 },
+  signinRow: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', gap: 12, background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 8, padding: '12px 14px', flexWrap: 'wrap' },
+  signinLeft: { minWidth: 0 },
+  signinName: { fontSize: 15, fontWeight: 700, color: '#E8E6E1' },
+  signinEmail: { fontSize: 11, color: '#5A6A7A', marginTop: 2 },
+  signinRight: { textAlign: 'right' },
+  signinMeta: { fontSize: 12, color: '#9CC4E8', fontWeight: 600 },
+  signinSub: { fontSize: 10, color: '#5A6A7A', marginTop: 2 },
+  signinFlag: { color: '#D4A843' },
 
   statsRow: { display: 'flex', gap: 10, marginBottom: 20, flexWrap: 'wrap' },
   statCard: { flex: 1, minWidth: 80, background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: '14px 12px', textAlign: 'center' },

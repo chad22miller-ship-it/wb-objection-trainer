@@ -61,7 +61,24 @@ export default async function handler(req, res) {
       return res.status(500).json({ error: 'Failed to fetch sessions' });
     }
 
-    return res.status(200).json({ sessions: data });
+    // Also return the account list (sign-ins) so the admin can see who has an
+    // account and when they last logged in — including people who haven't practiced.
+    let users = [];
+    try {
+      const { data: list } = await serviceClient.auth.admin.listUsers({ perPage: 1000 });
+      users = (list?.users || []).map((u) => ({
+        id: u.id,
+        email: u.email,
+        name: u.user_metadata?.display_name || u.user_metadata?.name || '',
+        createdAt: u.created_at,
+        lastSignIn: u.last_sign_in_at || null,
+        confirmed: !!u.email_confirmed_at,
+      }));
+    } catch (e) {
+      console.error('Admin listUsers error:', e);
+    }
+
+    return res.status(200).json({ sessions: data, users });
   } catch (err) {
     console.error('Admin API error:', err);
     return res.status(500).json({ error: 'Server error' });
