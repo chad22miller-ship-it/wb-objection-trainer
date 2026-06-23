@@ -4,9 +4,23 @@
 // failure: { ok: true, text } on success, { ok: false, error, status } on failure.
 // Auto-retries on 429 and transient 5xx up to 3 times with backoff.
 
+import { supabase } from './supabase';
+
+// The logged-in user's token, so the server can reject anonymous/abusive callers.
+async function authHeader() {
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch (e) {
+    return {};
+  }
+}
+
 export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
   const maxRetries = 3;
   let lastError = 'Connection error. Try again.';
+  const auth = await authHeader();
 
   for (let attempt = 0; attempt <= maxRetries; attempt++) {
     const controller = new AbortController();
@@ -15,7 +29,7 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', ...auth },
         signal: controller.signal,
         body: JSON.stringify({
           system,
@@ -34,7 +48,7 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
         }
         console.error('API error:', res.status, err);
         const error = res.status === 429 ? '⚠️ AI is busy right now. Wait a moment and try again.'
-          : res.status === 401 ? '⚠️ AI key problem — ask your team lead to check the API keys.'
+          : res.status === 401 ? '⚠️ Your session expired. Refresh the page and sign in again.'
           : res.status === 408 ? 'AI timed out. Try again.'
           : (err.error || 'Connection error. Try again.');
         return { ok: false, error, status: res.status };
