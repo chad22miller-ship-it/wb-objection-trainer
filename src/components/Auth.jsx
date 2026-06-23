@@ -20,11 +20,25 @@ export default function Auth({ onAuth }) {
         options: { data: { display_name: name } },
       });
       if (err) { setError(err.message); setLoading(false); return; }
-      if (data.user) onAuth(data.user);
+      // Only proceed if a real SESSION was created. If email confirmation is on,
+      // signUp returns a user but NO session — don't fake-login (that left users
+      // stuck creating new accounts every visit).
+      if (data.session) {
+        onAuth(data.user);
+      } else {
+        setError('Account created — check your email to confirm it, then come back and Sign in.');
+        setIsSignup(false);
+      }
     } else {
       const { data, error: err } = await supabase.auth.signInWithPassword({ email, password });
-      if (err) { setError(err.message); setLoading(false); return; }
-      if (data.user) onAuth(data.user);
+      if (err) {
+        setError(/not confirmed/i.test(err.message)
+          ? 'Your email isn’t confirmed yet — check your inbox for the confirmation link, then sign in.'
+          : err.message);
+        setLoading(false);
+        return;
+      }
+      if (data.session) onAuth(data.user);
     }
     setLoading(false);
   };
