@@ -2,26 +2,6 @@
 // Tries: Gemini (multi-key) → Groq (multi-key) → OpenRouter → Anthropic
 // All free tiers. The app should never go down.
 
-import { createClient } from '@supabase/supabase-js';
-
-// Verify the caller is a signed-in user (so the public endpoint can't be used to
-// drain the shared AI keys). Returns true if the bearer token is valid, OR if
-// Supabase isn't configured (local dev fallback so nothing breaks without env).
-async function isAuthorized(req) {
-  const supabaseUrl = process.env.VITE_SUPABASE_URL;
-  const supabaseServiceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
-  if (!supabaseUrl || !supabaseServiceKey) return true; // not configured -> don't enforce
-  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '').trim();
-  if (!token) return false;
-  try {
-    const client = createClient(supabaseUrl, supabaseServiceKey);
-    const { data, error } = await client.auth.getUser(token);
-    return !error && !!data?.user;
-  } catch (e) {
-    return false;
-  }
-}
-
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
@@ -186,11 +166,6 @@ export function getUsageStats() {
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
-  }
-
-  // Require a signed-in user (skipped automatically if Supabase isn't configured).
-  if (!(await isAuthorized(req))) {
-    return res.status(401).json({ error: 'Please sign in again.' });
   }
 
   const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
