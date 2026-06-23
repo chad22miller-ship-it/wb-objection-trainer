@@ -17,18 +17,76 @@ import Admin from './components/Admin';
 
 /* ============================== MAIN APP ============================== */
 
+function ResetPassword({ onDone }) {
+  const [password, setPassword] = useState('');
+  const [confirm, setConfirm] = useState('');
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const [done, setDone] = useState(false);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (password.length < 6) { setError('Password must be at least 6 characters.'); return; }
+    if (password !== confirm) { setError('Passwords do not match.'); return; }
+    setLoading(true); setError('');
+    const { error: err } = await supabase.auth.updateUser({ password });
+    if (err) { setError(err.message); setLoading(false); return; }
+    setDone(true); setLoading(false);
+  };
+
+  return (
+    <div style={RS.wrap}>
+      <div style={RS.card}>
+        <div style={RS.logo}>WB</div>
+        <h1 style={RS.title}>SET A NEW PASSWORD</h1>
+        {done ? (
+          <>
+            <div style={RS.success}>✅ Password updated — you're signed in.</div>
+            <button style={RS.btn} onClick={onDone}>Continue to the app</button>
+          </>
+        ) : (
+          <form onSubmit={submit} style={RS.form}>
+            <input type="password" placeholder="New password" value={password} onChange={(e) => setPassword(e.target.value)} style={RS.input} required minLength={6} autoFocus />
+            <input type="password" placeholder="Confirm new password" value={confirm} onChange={(e) => setConfirm(e.target.value)} style={RS.input} required minLength={6} />
+            {error && <div style={RS.error}>{error}</div>}
+            <button type="submit" style={RS.btn} disabled={loading}>{loading ? 'Saving…' : 'Update password'}</button>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const RS = {
+  wrap: { minHeight: '100vh', background: '#0F1419', display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 20 },
+  card: { width: '100%', maxWidth: 380, display: 'flex', flexDirection: 'column', alignItems: 'center' },
+  logo: { fontSize: 14, fontWeight: 700, letterSpacing: '3px', color: '#D4A843', border: '1px solid #D4A843', padding: '6px 14px', marginBottom: 28 },
+  title: { fontSize: 20, fontWeight: 800, letterSpacing: '3px', color: '#E8E6E1', margin: '0 0 24px', textAlign: 'center' },
+  form: { width: '100%', display: 'flex', flexDirection: 'column', gap: 12 },
+  input: { width: '100%', background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: 12, color: '#E8E6E1', fontSize: 14, fontFamily: 'inherit', outline: 'none', boxSizing: 'border-box' },
+  error: { fontSize: 13, color: '#E53935', textAlign: 'center', padding: '4px 0' },
+  success: { fontSize: 14, color: '#7CDC9C', textAlign: 'center', lineHeight: 1.6, marginBottom: 16 },
+  btn: { width: '100%', background: '#D4A843', border: 'none', borderRadius: 8, padding: 14, color: '#0F1419', fontSize: 14, fontWeight: 700, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
+};
+
 export default function App() {
   const [user, setUser] = useState(null);
   const [authLoading, setAuthLoading] = useState(true);
+  const [recovery, setRecovery] = useState(false);
 
   // Check for existing session on mount
   useEffect(() => {
     if (!supabase) { setAuthLoading(false); return; }
+    // Arrived via a password-reset link? Show the set-new-password screen.
+    if (typeof window !== 'undefined' && window.location.hash.includes('type=recovery')) {
+      setRecovery(true);
+    }
     supabase.auth.getSession().then(({ data }) => {
       setUser(data.session?.user || null);
       setAuthLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, session) => {
+    const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
+      if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setUser(session?.user || null);
     });
     return () => listener?.subscription?.unsubscribe();
@@ -36,6 +94,14 @@ export default function App() {
 
   if (authLoading) {
     return <div style={{ minHeight: '100vh', background: '#0F1419', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#8899A6' }}>Loading…</div>;
+  }
+
+  // Password-recovery flow takes priority over the normal sign-in gate.
+  if (recovery) {
+    return <ResetPassword onDone={() => {
+      setRecovery(false);
+      if (typeof window !== 'undefined') window.history.replaceState(null, '', window.location.pathname);
+    }} />;
   }
 
   // If Supabase is configured, require auth. Otherwise run without auth (local dev).
