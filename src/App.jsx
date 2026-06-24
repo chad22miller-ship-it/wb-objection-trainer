@@ -205,6 +205,7 @@ function Trainer({ user }) {
   const difficultyRef = useRef(3);
   const profileIdxRef = useRef(0);
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
+  const seedProfileRef = useRef(null); // prospect's full hidden profile (PPF) carried into a switched Raja call
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
@@ -503,7 +504,13 @@ function Trainer({ user }) {
       let sys = SYSTEM_RAJA;
       if (seedRef.current) {
         // Replaying a Prospect call: Raja now sells the SAME client the trainee just practiced on.
-        sys += '\n\nSEEDED CLIENT — the person you are calling is the SAME client from the prior call below, where a trainee rep was practicing on them. Their situation and the WHY that came up are in the transcript. Run YOUR masterful call on this same client: greet them warmly and draw out their story and deep WHY through your invitational, "tell me more" style — demonstrate how a master uncovers what the trainee was reaching for. The user is now playing this client.\n\nPRIOR CALL (the client is the PROSPECT in it):\n' + seedRef.current;
+        sys += '\n\nSEEDED CLIENT — the person you are calling is the SAME client from the prior call below, where a trainee rep was practicing on them. Their situation and the WHY that came up are in the transcript. Run YOUR masterful call on this same client: greet them warmly and draw out their story and deep WHY through your invitational, "tell me more" style — demonstrate how a master uncovers what the trainee was reaching for. The user is now playing this client.';
+        if (seedProfileRef.current) {
+          // Carry the prospect's full hidden profile (PPF) so it's the SAME person with the SAME details,
+          // not just whatever happened to be spoken aloud in the prior call.
+          sys += '\n\nWHO THIS CLIENT REALLY IS (their full background — stay 100% consistent with this exact person and these exact details; the user is playing them, so treat anything they say as coming from this character):\n' + seedProfileRef.current;
+        }
+        sys += '\n\nPRIOR CALL (the client is the PROSPECT in it):\n' + seedRef.current;
       }
       return sys;
     }
@@ -555,6 +562,7 @@ function Trainer({ user }) {
     const prospect = PROSPECT_PROFILES[pIdx];
 
     seedRef.current = seed || null;
+    if (!seed) seedProfileRef.current = null; // fresh menu start — drop any carried prospect profile
     setIsSeeded(!!seed);
     offTrackHelpedRef.current = false;
     whyEstablishedRef.current = false;
@@ -731,13 +739,17 @@ function Trainer({ user }) {
   // Switch roles out of a Raja call: replay the SAME client story, but now the
   // trainee runs discovery as the rep (seeded roleplay).
   const switchRolesFromRaja = () => {
+    seedProfileRef.current = null; // Raja calls have no prospect profile to carry
     const seed = messagesRef.current
       .map((m) => `${m.role === 'user' ? 'CLIENT' : 'RAJA'}: ${m.content}`).join('\n\n');
     startSession('roleplay', difficulty, seed);
   };
 
   // Switch roles out of a Prospect call: Raja now sells the SAME prospect (you play the client).
+  // Carry BOTH the spoken transcript AND the prospect's full hidden profile (PPF) so Raja faces
+  // the exact same person with the same details, not just whatever was said aloud.
   const switchRolesFromRoleplay = () => {
+    seedProfileRef.current = PROSPECT_PROFILES[sessionRef.current.profileIdx]?.profile || null;
     const seed = messagesRef.current
       .map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
     startSession('raja', difficulty, seed);
@@ -1308,7 +1320,7 @@ function Trainer({ user }) {
                 <div style={S.debriefActions}>
                   {flipMode(mode) && (
                     <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : switchRolesFromRoleplay()}>
-                      🔄 Switch roles — {mode === 'raja' ? 'now YOU run this same call' : 'watch Raja run this same client'}
+                      {mode === 'raja' ? '🔄 Switch roles — now YOU run this same client' : '🎓 Switch to Raja — he sells this SAME prospect (you play them)'}
                     </button>
                   )}
                   <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty, isSeeded ? seedRef.current : null)}>↻ Run it again</button>
