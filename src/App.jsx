@@ -630,9 +630,10 @@ function Trainer({ user }) {
     let reply = result.text;
     const { clean, whyScore, drillScore } = stripProgressTags(reply);
     reply = clean;
-    if (modeRef.current === 'roleplay' && whyScore != null) {
+    if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
       setWhyProgress(whyScore);
-      if (whyScore >= 8 && !showCongrats) setShowCongrats(true);
+      // Congrats popup only in roleplay (where the rep earned it) — not Raja mode.
+      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
     }
     if (modeRef.current === 'drill' && drillScore != null) {
       setDrillProgress(drillScore);
@@ -1474,6 +1475,37 @@ function Trainer({ user }) {
             <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
             <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
               placeholder="Handle the objection…"
+              style={S.input} rows={1} disabled={loading} />
+            <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
+          </div>
+        </div>
+
+      /* Raja mode — WHY bar (Raja getting YOUR why) + an input row, since you reply as the client */
+      ) : mode === 'raja' && messages.length > 0 ? (
+        <div style={S.whyBarBottom}>
+          <div style={S.whyBarHeader}>
+            <span style={S.whyBarLabel}>RAJA — GETTING YOUR WHY</span>
+            <span style={S.whyBarPct}>{whyProgress * 10}%</span>
+          </div>
+          <div style={S.whyBarTrack}>
+            <div style={{
+              ...S.whyBarFill,
+              width: `${whyProgress * 10}%`,
+              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
+            }} />
+          </div>
+          <div style={S.whyBarHint}>
+            {whyProgress <= 2 && 'Raja is breaking the ice and getting to know you.'}
+            {whyProgress > 2 && whyProgress <= 4 && "He's into your situation now — answer like a real client."}
+            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — he's circling what really matters to you."}
+            {whyProgress > 6 && whyProgress < 8 && "Almost there — notice how he makes you feel the gap."}
+            {whyProgress >= 8 && whyProgress < 10 && "He's uncovered your WHY. Watch him bridge to the solution."}
+            {whyProgress >= 10 && 'Masterful — your WHY is fully on the table.'}
+          </div>
+          <div style={S.drillInputRow}>
+            <button style={S.callCircle} onClick={startCall} title="Start live call">📞</button>
+            <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+              placeholder="Reply as the client…"
               style={S.input} rows={1} disabled={loading} />
             <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
           </div>
