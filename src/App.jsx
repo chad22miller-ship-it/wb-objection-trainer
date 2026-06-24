@@ -207,6 +207,7 @@ function Trainer({ user }) {
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
+  const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
@@ -556,6 +557,7 @@ function Trainer({ user }) {
     seedRef.current = seed || null;
     setIsSeeded(!!seed);
     offTrackHelpedRef.current = false;
+    whyEstablishedRef.current = false;
 
     sessionRef.current = {
       id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
@@ -600,6 +602,21 @@ function Trainer({ user }) {
     return { clean, whyScore, drillScore };
   }, []);
 
+  // Raja phase nudge: once the why is established, inject a one-line directive (this reply
+  // only) that pushes the call forward — quantify, then confirm/reframe/close — so Raja
+  // can't loop in discovery. Returns '' for other modes or before the why is established.
+  const rajaStageNudge = (msgs) => {
+    if (modeRef.current !== 'raja' || !whyEstablishedRef.current) return '';
+    const userText = msgs.filter((m) => m.role === 'user').map((m) => m.content).join('  ');
+    const lastRaja = [...msgs].reverse().find((m) => m.role === 'assistant')?.content || '';
+    // Already running the close/booking? Let it finish naturally.
+    if (/new art of living|hollywood|minutes right now|tomorrow at|five pm|six pm|book (a|you)|get a time/i.test(lastRaja)) return '';
+    const gaveNumber = /\$\s?\d|\d+\s*(k\b|grand|thousand|hundred)|\ba month\b/i.test(userText);
+    return gaveNumber
+      ? "\n\nDIRECTIVE (THIS REPLY ONLY): The emotional why is established and the client has given a dollar number. Move the call FORWARD now — briefly confirm the number, reframe that this was never about the money but about their dream, then run your full New Art of Living close and book a specific time. Do NOT ask another discovery or feelings question."
+      : "\n\nDIRECTIVE (THIS REPLY ONLY): The client's emotional why is clearly established. STOP discovery — your NEXT move is to QUANTIFY: ask them what dollar amount a month would make that dream real. Do NOT ask another feelings question.";
+  };
+
   /* ---------- send (ref-based for call mode) ---------- */
   const sendTextFromRef = useCallback(async (text) => {
     const t = (text || '').trim();
@@ -613,9 +630,10 @@ function Trainer({ user }) {
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs);
     const result = await callAPI(
       newMsgs.map((m) => ({ role: m.role, content: m.content })),
-      buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current)
+      sys
     );
 
     // Drop the reply if the session was switched/restarted mid-request (stale-write guard).
@@ -632,6 +650,8 @@ function Trainer({ user }) {
     reply = clean;
     if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
       setWhyProgress(whyScore);
+      // Raja: once the why is established, the phase nudge starts pushing toward the close.
+      if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
       // Congrats popup only in roleplay (where the rep earned it) — not Raja mode.
       if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
     }
