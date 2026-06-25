@@ -167,6 +167,12 @@ function Trainer({ user }) {
   const [debriefScores, setDebriefScores] = useState(null);
   const [debriefLoading, setDebriefLoading] = useState(false);
   const [showDebrief, setShowDebrief] = useState(false);
+  // Watch-Raja demo: two AIs (Raja + the SAME prospect) auto-play the call while the user just observes.
+  const [watchMode, setWatchMode] = useState(false);
+  const [watchMsgs, setWatchMsgs] = useState([]); // [{ speaker: 'raja' | 'prospect', content }]
+  const [watchThinking, setWatchThinking] = useState(null); // 'raja' | 'prospect' | null
+  const [watchDone, setWatchDone] = useState(false);
+  const [watchName, setWatchName] = useState('');
   const [whyProgress, setWhyProgress] = useState(0);
   const [showCongrats, setShowCongrats] = useState(false);
   const [drillProgress, setDrillProgress] = useState(0);
@@ -189,6 +195,7 @@ function Trainer({ user }) {
   const [showPattern, setShowPattern] = useState(false);
 
   const chatEndRef = useRef(null);
+  const watchEndRef = useRef(null);
   const inputRef = useRef(null);
   const synthRef = useRef(null);
   const voicesRef = useRef([]);
@@ -215,6 +222,7 @@ function Trainer({ user }) {
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
   const pauseGraceRef = useRef(2000); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
+  const watchStopRef = useRef(false); // lets the user stop the Watch-Raja auto-play mid-run
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
@@ -253,6 +261,7 @@ function Trainer({ user }) {
   }, []);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, hintText, debriefText, showDebrief, hintOpen]);
+  useEffect(() => { if (watchMode) watchEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [watchMsgs, watchThinking, watchMode]);
 
   // Poll API usage stats
   useEffect(() => {
@@ -752,14 +761,95 @@ function Trainer({ user }) {
     startSession('roleplay', difficulty, seed);
   };
 
-  // Switch roles out of a Prospect call: Raja now sells the SAME prospect (you play the client).
-  // Carry BOTH the spoken transcript AND the prospect's full hidden profile (PPF) so Raja faces
-  // the exact same person with the same details, not just whatever was said aloud.
-  const switchRolesFromRoleplay = () => {
-    seedProfileRef.current = PROSPECT_PROFILES[sessionRef.current.profileIdx]?.profile || null;
-    const seed = messagesRef.current
-      .map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
-    startSession('raja', difficulty, seed);
+  /* ---------- Watch Raja run the SAME prospect (two AIs auto-play; the user just observes) ---------- */
+  // Build the two facing system prompts: Raja (the master rep) and the SAME prospect, both seeded
+  // with the prospect's profile + the prior transcript so it's the exact person you just talked to.
+  const buildWatchSystems = (profile, prior, diff) => {
+    const rajaSys = SYSTEM_RAJA +
+      '\n\nSEEDED CLIENT — you are calling the SAME client from the prior practice call below, where a trainee rep was practicing on them. Run YOUR masterful call on this exact person: greet them warmly, draw out their story and deep WHY with your invitational "tell me more" style, then bridge to the New Art of Living and book a specific time. The person replying to you IS this client.' +
+      (profile ? '\n\nWHO THE CLIENT IS:\n' + profile : '') +
+      '\n\nPRIOR CALL (the client is the PROSPECT in it):\n' + prior;
+    const prosSys = SYSTEM_ROLEPLAY + '\n\n' + (ROLEPLAY_DIFF[diff] || '') +
+      (profile ? '\n\nYOUR SPECIFIC PROFILE:\n' + profile : '') +
+      '\n\nYou are the SAME person from the prior call below — stay 100% consistent with these exact facts and your hidden WHY. A master rep named Raja is now calling you. Make him EARN it like a real guarded person would: stay surface-level at first and reveal your real emotional WHY only as he digs with genuine, caring questions.\n\nPRIOR CALL (you are the PROSPECT in it):\n' + prior;
+    return { rajaSys, prosSys };
+  };
+
+  const stopWatch = () => { watchStopRef.current = true; setWatchThinking(null); setWatchDone(true); };
+  const closeWatch = () => { watchStopRef.current = true; stopSpeaking(); setWatchMode(false); setWatchThinking(null); setShowDebrief(true); };
+
+  const runWatchDemo = async () => {
+    const prior = messagesRef.current.map((m) => `${m.role === 'user' ? 'REP' : 'PROSPECT'}: ${m.content}`).join('\n\n');
+    if (!prior) return;
+    const wasSeeded = !!seedRef.current;
+    const prof = PROSPECT_PROFILES[sessionRef.current.profileIdx];
+    const profile = wasSeeded ? '' : (prof?.profile || ''); // a seeded roleplay has no clean profile; the transcript carries the person
+    const name = sessionRef.current.prospectName || (wasSeeded ? 'the client' : prof?.name) || 'the prospect';
+    const diff = difficultyRef.current;
+    const { rajaSys, prosSys } = buildWatchSystems(profile, prior, diff);
+
+    stopSpeaking();
+    setShowDebrief(false);
+    setWatchName(name);
+    setWatchMsgs([]); setWatchThinking('raja'); setWatchDone(false); setWatchMode(true);
+    setWhyProgress(0);
+    watchStopRef.current = false;
+
+    const out = [];
+    const push = (speaker, content) => { out.push({ speaker, content }); setWatchMsgs([...out]); };
+    const rajaHist = [{ role: 'user', content: '(You are now on the phone with this client and they have just answered. Greet them warmly and begin the call.)' }];
+    const prosHist = [];
+    const MAX_LINES = 18;
+    let lastWhy = 0;
+    let booked = false;
+
+    // Raja opens the call.
+    let r = await callAPI(rajaHist, rajaSys);
+    if (watchStopRef.current) return;
+    if (!r.ok) { setApiError(r.error || 'Could not start the demo. Try again.'); setWatchThinking(null); setWatchDone(true); return; }
+    let rajaLine = stripProgressTags(r.text).clean;
+    push('raja', rajaLine);
+    rajaHist.push({ role: 'assistant', content: rajaLine });
+    prosHist.push({ role: 'user', content: rajaLine });
+
+    while (out.length < MAX_LINES && !watchStopRef.current && !booked) {
+      // The prospect answers Raja.
+      setWatchThinking('prospect');
+      await new Promise((res) => setTimeout(res, 450));
+      if (watchStopRef.current) break;
+      const p = await callAPI(prosHist, prosSys);
+      if (watchStopRef.current) break;
+      if (!p.ok) { setApiError(p.error || 'AI is busy — try again in a moment.'); break; }
+      const ps = stripProgressTags(p.text);
+      if (ps.whyScore != null) { lastWhy = ps.whyScore; setWhyProgress(ps.whyScore); }
+      push('prospect', ps.clean);
+      prosHist.push({ role: 'assistant', content: ps.clean });
+      rajaHist.push({ role: 'user', content: ps.clean });
+      if (out.length >= MAX_LINES) break;
+
+      // Raja replies — once the why is in, nudge him to quantify then close (same as live Raja).
+      setWatchThinking('raja');
+      await new Promise((res) => setTimeout(res, 450));
+      if (watchStopRef.current) break;
+      let demoNudge = '';
+      if (lastWhy >= 7) {
+        const gaveNumber = /\$\s?\d|\d+\s*(k\b|grand|thousand|hundred)|\ba month\b/i.test(prosHist.map((m) => m.content).join(' '));
+        demoNudge = gaveNumber
+          ? "\n\nDIRECTIVE (THIS REPLY ONLY): The why is established and the client gave a dollar number. Confirm it, reframe that it was never about money but their dream, run your full New Art of Living close, and book a specific time. Do NOT ask another discovery question."
+          : "\n\nDIRECTIVE (THIS REPLY ONLY): The emotional why is established. STOP discovery — QUANTIFY next: ask what dollar amount a month would make the dream real. Do NOT ask another feelings question.";
+      }
+      r = await callAPI(rajaHist, rajaSys + demoNudge);
+      if (watchStopRef.current) break;
+      if (!r.ok) { setApiError(r.error || 'AI is busy — try again in a moment.'); break; }
+      rajaLine = stripProgressTags(r.text).clean;
+      push('raja', rajaLine);
+      rajaHist.push({ role: 'assistant', content: rajaLine });
+      prosHist.push({ role: 'user', content: rajaLine });
+      if (/tomorrow at|wednesday at|monday at|best number|lock (it|in|in a time)|on the calendar|book (a|you|it|us)|\b5 ?pm\b|\b6 ?pm\b|five pm|six pm/i.test(rajaLine)) booked = true;
+    }
+
+    setWatchThinking(null);
+    setWatchDone(true);
   };
 
   /* ---------- hints ---------- */
@@ -1336,8 +1426,8 @@ function Trainer({ user }) {
                 )}
                 <div style={S.debriefActions}>
                   {flipMode(mode) && (
-                    <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : switchRolesFromRoleplay()}>
-                      {mode === 'raja' ? '🔄 Switch roles — now YOU run this same client' : '🎓 Switch to Raja — he sells this SAME prospect (you play them)'}
+                    <button style={S.debriefActionBtn} onClick={() => mode === 'raja' ? switchRolesFromRaja() : runWatchDemo()}>
+                      {mode === 'raja' ? '🔄 Switch roles — now YOU run this same client' : '🎬 Watch Raja run this SAME prospect'}
                     </button>
                   )}
                   <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty, isSeeded ? seedRef.current : null)}>↻ Run it again</button>
@@ -1346,6 +1436,55 @@ function Trainer({ user }) {
               </>
             )
           }
+        </div>
+      )}
+
+      {/* Watch Raja run the SAME prospect — two AIs auto-play, you just observe */}
+      {watchMode && (
+        <div style={S.watchPanel}>
+          <div style={S.debriefHeader}>
+            <div style={S.coachLabel}>🎬 WATCH RAJA — {watchName.toUpperCase()}</div>
+            <button style={S.hintClose} onClick={closeWatch}>✕</button>
+          </div>
+          <div style={S.watchWhyBar}>
+            <div style={S.whyBarHeader}>
+              <span style={S.whyBarLabel}>RAJA — GETTING THE WHY</span>
+              <span style={S.whyBarPct}>{whyProgress * 10}%</span>
+            </div>
+            <div style={S.whyBarTrack}>
+              <div style={{ ...S.whyBarFill, width: `${whyProgress * 10}%`, background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A' }} />
+            </div>
+          </div>
+          <div style={S.watchBody}>
+            {watchMsgs.map((m, i) => (
+              <div key={i} style={{ ...S.msgRow, justifyContent: m.speaker === 'prospect' ? 'flex-end' : 'flex-start' }}>
+                <div style={{ ...S.msgBubble, ...(m.speaker === 'prospect' ? S.userBubble : S.botBubble) }}>
+                  <div style={S.speakerLabel}>{m.speaker === 'raja' ? '🎓 RAJA' : watchName.toUpperCase()}</div>
+                  <div style={S.msgText}>{m.content}</div>
+                  <button style={S.replayBtn} onClick={() => speak(m.content)} title="Hear it">🔄</button>
+                </div>
+              </div>
+            ))}
+            {watchThinking && (
+              <div style={{ ...S.msgRow, justifyContent: watchThinking === 'prospect' ? 'flex-end' : 'flex-start' }}>
+                <div style={{ ...S.msgBubble, ...(watchThinking === 'prospect' ? S.userBubble : S.botBubble) }}>
+                  <div style={S.speakerLabel}>{watchThinking === 'raja' ? '🎓 RAJA' : watchName.toUpperCase()}</div>
+                  <div style={S.typing}><span style={S.dot}>●</span><span style={{ ...S.dot, animationDelay: '.2s' }}>●</span><span style={{ ...S.dot, animationDelay: '.4s' }}>●</span></div>
+                </div>
+              </div>
+            )}
+            <div ref={watchEndRef} />
+          </div>
+          <div style={S.debriefActions}>
+            {watchDone ? (
+              <>
+                <button style={S.debriefActionBtn} onClick={runWatchDemo}>↻ Watch it again</button>
+                <button style={S.debriefActionGhost} onClick={closeWatch}>← Back to debrief</button>
+              </>
+            ) : (
+              <button style={S.debriefActionGhost} onClick={stopWatch}>⏹ Stop</button>
+            )}
+          </div>
         </div>
       )}
 
@@ -1663,6 +1802,9 @@ const S = {
   // Debrief
   debriefBtn: { marginLeft: 'auto', background: '#1A2A3A', border: '1px solid #3A5A7A', color: '#6FA8DC', fontSize: 12, padding: '6px 14px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', fontWeight: 600 },
   debriefPanel: { position: 'fixed', top: 60, left: 16, right: 16, bottom: 80, background: '#161E2B', border: '2px solid #D4A843', borderRadius: 14, padding: '16px 18px', zIndex: 50, overflowY: 'auto', boxShadow: '0 12px 40px rgba(0,0,0,.6)' },
+  watchPanel: { position: 'fixed', top: 60, left: 16, right: 16, bottom: 80, background: '#161E2B', border: '2px solid #D4A843', borderRadius: 14, padding: '14px 16px', zIndex: 50, boxShadow: '0 12px 40px rgba(0,0,0,.6)', display: 'flex', flexDirection: 'column' },
+  watchWhyBar: { padding: '6px 0 10px', borderBottom: '1px solid #2A3A4A', marginBottom: 8 },
+  watchBody: { flex: 1, overflowY: 'auto', paddingRight: 4 },
   debriefHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   debriefInHistory: { marginTop: 12, padding: '12px 0 0', borderTop: '1px solid #2A3A4A' },
 
