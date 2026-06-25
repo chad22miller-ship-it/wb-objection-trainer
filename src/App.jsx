@@ -147,6 +147,11 @@ function Trainer({ user }) {
   const [callError, setCallError] = useState('');
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // How long the live call waits after you stop talking before the prospect replies (ms).
+  const [pauseGrace, setPauseGrace] = useState(() => {
+    try { const v = Number(localStorage.getItem('wb_pause_grace')); if (v >= 500 && v <= 5000) return v; } catch (e) {}
+    return 2000;
+  });
   const [hintOpen, setHintOpen] = useState(false);
   const [hintMenu, setHintMenu] = useState(false);
   const [hintType, setHintType] = useState('');
@@ -209,8 +214,10 @@ function Trainer({ user }) {
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
+  const pauseGraceRef = useRef(2000); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
+  useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
   useEffect(() => { profileIdxRef.current = profileIdx; }, [profileIdx]);
 
@@ -394,7 +401,7 @@ function Trainer({ user }) {
           if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
           if (handleTurnRef.current) handleTurnRef.current(said);
         }
-      }, 1500);
+      }, pauseGraceRef.current || 2000);
     };
     r.onerror = (ev) => {
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
@@ -1170,6 +1177,16 @@ function Trainer({ user }) {
                 </button>
               ))}
             </div>
+            <div style={S.settingLabel}>PAUSE BEFORE REPLY</div>
+            <div style={S.diffMini}>
+              {[1000, 2000, 3000].map((ms) => (
+                <button key={ms} onClick={() => setPauseGrace(ms)}
+                  style={{ ...S.diffMiniBtn, borderColor: pauseGrace === ms ? '#D4A843' : '#2A3A4A', background: pauseGrace === ms ? '#D4A843' : 'transparent', color: pauseGrace === ms ? '#0F1419' : '#8899A6' }}>
+                  {ms / 1000}s
+                </button>
+              ))}
+            </div>
+            <div style={{ fontSize: 10, color: '#6B7785', marginTop: -8, marginBottom: 14, lineHeight: 1.4 }}>How long it waits after you stop talking before it replies. Higher = more room to pause and think mid-sentence.</div>
             <div style={S.settingLabel}>VOICE</div>
             <select value={selectedVoiceName} onChange={(e) => setSelectedVoiceName(e.target.value)} style={S.voiceSelect}>
               {voices.length === 0 && <option>Loading voices…</option>}
