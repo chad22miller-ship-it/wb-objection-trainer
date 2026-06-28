@@ -182,26 +182,26 @@ export default async function handler(req, res) {
     let allRateLimited = true;
     const note = (s) => { lastStatus = s; if (s !== 429) allRateLimited = false; };
 
-    // --- 1. Try Gemini keys ---
-    for (let i = 0; i < geminiKeys.length; i++) {
-      const id = `gemini:${i}`;
-      if (!isReady(id)) continue;
-      const result = await callGemini(geminiKeys[i], geminiBody);
-      if (result.ok) {
-        console.log(`[chat] ✓ Gemini key${i + 1}`);
-        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
-      }
-      if (result.status === 429) setCooldown(id, 60000);
-      note(result.status);
-    }
-
-    // --- 2. Try Groq keys ---
+    // --- 1. Try Groq keys ---
     for (let i = 0; i < groqKeys.length; i++) {
       const id = `groq:${i}`;
       if (!isReady(id)) continue;
       const result = await callGroq(groqKeys[i], system, messages, max_tokens);
       if (result.ok) {
         console.log(`[chat] ✓ Groq key${i + 1}`);
+        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+      }
+      if (result.status === 429) setCooldown(id, 60000);
+      note(result.status);
+    }
+
+    // --- 2. Try Gemini keys ---
+    for (let i = 0; i < geminiKeys.length; i++) {
+      const id = `gemini:${i}`;
+      if (!isReady(id)) continue;
+      const result = await callGemini(geminiKeys[i], geminiBody);
+      if (result.ok) {
+        console.log(`[chat] ✓ Gemini key${i + 1}`);
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown(id, 60000);
