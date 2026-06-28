@@ -183,8 +183,8 @@ function Trainer({ user }) {
   // Silence window after you stop talking before the prospect replies. New storage
   // key (v2) so the snappier 1s default replaces the old 2s value people had saved.
   const [pauseGrace, setPauseGrace] = useState(() => {
-    try { const v = Number(localStorage.getItem('wb_pause_grace2')); if (v >= 400 && v <= 5000) return v; } catch (e) {}
-    return 1000;
+    try { const v = Number(localStorage.getItem('wb_pause_grace3')); if (v >= 400 && v <= 5000) return v; } catch (e) {}
+    return 1500;
   });
   const [hintOpen, setHintOpen] = useState(false);
   const [hintMenu, setHintMenu] = useState(false);
@@ -208,7 +208,6 @@ function Trainer({ user }) {
   const [watchDone, setWatchDone] = useState(false);
   const [watchName, setWatchName] = useState('');
   const [whyProgress, setWhyProgress] = useState(0);
-  const [showCongrats, setShowCongrats] = useState(false);
   const [drillProgress, setDrillProgress] = useState(0);
   const [isSeeded, setIsSeeded] = useState(false); // roleplay seeded with a prior Raja call
   const [apiError, setApiError] = useState(''); // transient banner for a failed AI request
@@ -266,12 +265,12 @@ function Trainer({ user }) {
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
-  const pauseGraceRef = useRef(1000); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
+  const pauseGraceRef = useRef(1500); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
   const watchStopRef = useRef(false); // lets the user stop the Watch-Raja auto-play mid-run
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { callStateRef.current = callState; }, [callState]);
-  useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace2', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
+  useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace3', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
   useEffect(() => { profileIdxRef.current = profileIdx; }, [profileIdx]);
 
@@ -609,10 +608,15 @@ function Trainer({ user }) {
     };
     r.onend = () => {
       if (!callActiveRef.current) return;
-      if (silenceTimerRef.current) return;
+      if (silenceTimerRef.current) return; // a send is already scheduled — let the grace timer fire
+      // Recognition ended with no pending send. Do NOT send now — Chrome ends mid-pause
+      // and sending here cuts the user off mid-thought. Restart listening, carrying what
+      // was said so far as a seed, so they can keep talking; the silence timer (with the
+      // full grace window) is the only thing that actually sends a turn.
       const said = buf.trim();
-      if (said.length > 1 && handleTurnRef.current) handleTurnRef.current(said);
-      else setTimeout(() => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); }, 200);
+      setTimeout(() => {
+        if (callActiveRef.current && startListeningRef.current) startListeningRef.current(said.length > 1 ? said : '');
+      }, 150);
     };
     callRecRef.current = r;
     try {
@@ -815,7 +819,7 @@ function Trainer({ user }) {
     setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
     setMessages([]); setRounds([]); setInput('');
     setHintOpen(false); setHintMenu(false); setHintText(''); setSettingsOpen(false);
-    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setShowCongrats(false); setDrillProgress(0); setApiError('');
+    setShowDebrief(false); setDebriefText(''); setDebriefScores(null); setWhyProgress(0); setDrillProgress(0); setApiError('');
     debriefRunningRef.current = false;
     setLoading(true); startTimer();
 
@@ -870,7 +874,6 @@ function Trainer({ user }) {
     if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
       setWhyProgress(whyScore);
       if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
-      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
     }
     if (modeRef.current === 'drill' && drillScore != null) setDrillProgress(drillScore);
     const finalMsgs = [...newMsgs, { role: 'assistant', content: clean }];
@@ -883,7 +886,7 @@ function Trainer({ user }) {
     await saveSession(finalMsgs, nextRounds);
     setLoading(false);
     return clean;
-  }, [saveSession, stripProgressTags, showCongrats]);
+  }, [saveSession, stripProgressTags]);
 
   /* ---------- send (ref-based for call mode) ---------- */
   const sendTextFromRef = useCallback(async (text) => {
@@ -1571,7 +1574,7 @@ function Trainer({ user }) {
             </div>
             <div style={S.settingLabel}>PAUSE BEFORE REPLY</div>
             <div style={S.diffMini}>
-              {[700, 1000, 1500, 2500].map((ms) => (
+              {[1000, 1500, 2000, 3000].map((ms) => (
                 <button key={ms} onClick={() => setPauseGrace(ms)}
                   style={{ ...S.diffMiniBtn, borderColor: pauseGrace === ms ? '#D4A843' : '#2A3A4A', background: pauseGrace === ms ? '#D4A843' : 'transparent', color: pauseGrace === ms ? '#0F1419' : '#8899A6' }}>
                   {ms / 1000}s
@@ -1639,21 +1642,6 @@ function Trainer({ user }) {
                 <button style={S.calibRecordBtn} onClick={beginRecord}>● Try again</button>
               </>
             )}
-          </div>
-        </div>
-      )}
-
-      {/* Congrats overlay */}
-      {showCongrats && (
-        <div style={S.congratsOverlay} onClick={() => setShowCongrats(false)}>
-          <div style={S.congratsModal} onClick={(e) => e.stopPropagation()}>
-            <div style={S.congratsEmoji}>🔥</div>
-            <div style={S.congratsTitle}>YOU GOT THE WHY</div>
-            <div style={S.congratsBody}>
-              They said it out loud. They feel the gap between where they are and where they want to be.
-              Now bridge into the New Art of Living — Freedom, Security, Peace. You've earned this moment.
-            </div>
-            <button style={S.congratsBtn} onClick={() => setShowCongrats(false)}>Keep Going</button>
           </div>
         </div>
       )}
