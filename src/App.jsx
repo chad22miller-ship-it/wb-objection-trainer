@@ -1,7 +1,7 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { supabase } from './lib/supabase';
 import { store } from './lib/store';
-import { callAPI } from './lib/api';
+import { callAPI, callAPIStream } from './lib/api';
 import {
   cleanForSpeech, chunkText, clamp, median, autoCorrelate,
   parseScores, parseDebriefScores,
@@ -16,6 +16,28 @@ import Auth from './components/Auth';
 import Admin from './components/Admin';
 
 /* ============================== MAIN APP ============================== */
+
+// Live call mode: keep replies short and spoken-sounding, and let the prospect
+// barge in (talk over the AI) like a real phone call. AUTO_BARGE works best with
+// headphones — on laptop speakers the mic can hear the AI and self-interrupt;
+// flip to false to disable.
+const AUTO_BARGE = true;
+const CALL_BREVITY = "\n\nVOICE CALL MODE: You are on a live phone call. Talk like a real person — reply in 1 to 2 short, natural spoken sentences. No lists, no markdown, no stage directions. Get to the point fast and let them respond. If a progress tag like [WHY_PROGRESS:n] is required, put it at the very end after your spoken words.";
+
+// Web Speech voices don't expose gender, so we infer it from the voice name.
+// These cover the common Windows (SAPI), Edge "Online (Natural)", and Chrome
+// Google voices Chad's users will have. Used to match the prospect's gender.
+const FEMALE_VOICE_NAMES = ['zira', 'samantha', 'victoria', 'karen', 'moira', 'tessa', 'fiona', 'susan', 'catherine', 'hazel', 'serena', 'allison', 'ava', 'kate', 'linda', 'heather', 'aria', 'jenny', 'michelle', 'ana', 'sara', 'nancy', 'jane', 'ashley', 'amber', 'emma', 'sonia', 'nora', 'jessa', 'clara', 'libby', 'maisie'];
+const MALE_VOICE_NAMES = ['david', 'mark', 'alex', 'daniel', 'fred', 'tom', 'george', 'paul', 'aaron', 'arthur', 'guy', 'christopher', 'eric', 'brandon', 'jason', 'tony', 'davis', 'andrew', 'brian', 'steffan', 'ryan', 'oliver', 'william', 'rishi', 'roger', 'thomas'];
+const voiceGender = (name) => {
+  const n = (name || '').toLowerCase();
+  if (/\bfemale\b/.test(n)) return 'female';
+  if (/\bmale\b/.test(n)) return 'male';
+  if (FEMALE_VOICE_NAMES.some((x) => n.includes(x))) return 'female';
+  if (MALE_VOICE_NAMES.some((x) => n.includes(x))) return 'male';
+  return null;
+};
+
 
 function ResetPassword({ onDone }) {
   const [password, setPassword] = useState('');
@@ -148,9 +170,11 @@ function Trainer({ user }) {
 
   const [settingsOpen, setSettingsOpen] = useState(false);
   // How long the live call waits after you stop talking before the prospect replies (ms).
+  // Silence window after you stop talking before the prospect replies. New storage
+  // key (v2) so the snappier 1s default replaces the old 2s value people had saved.
   const [pauseGrace, setPauseGrace] = useState(() => {
-    try { const v = Number(localStorage.getItem('wb_pause_grace')); if (v >= 500 && v <= 5000) return v; } catch (e) {}
-    return 2000;
+    try { const v = Number(localStorage.getItem('wb_pause_grace2')); if (v >= 400 && v <= 5000) return v; } catch (e) {}
+    return 1000;
   });
   const [hintOpen, setHintOpen] = useState(false);
   const [hintMenu, setHintMenu] = useState(false);
@@ -213,6 +237,15 @@ function Trainer({ user }) {
   const silenceTimerRef = useRef(null);
   const handleTurnRef = useRef(null);
   const startListeningRef = useRef(null);
+  // Live-call streaming speech queue: sentences are spoken as they arrive from the
+  // model instead of waiting for the whole reply. Refs (not state) to avoid re-renders.
+  const sqItemsRef = useRef([]);      // pending sentences to speak
+  const sqSpeakingRef = useRef(false); // is an utterance currently playing
+  const sqDoneRef = useRef(false);     // has the model stream finished
+  const sqDrainRef = useRef(null);     // callback to fire when queue empties AND stream done
+  const bargeRecRef = useRef(null);    // recognizer that listens while the AI speaks (barge-in)
+  const callStateRef = useRef('idle'); // mirror of callState for use inside async callbacks
+  const turnIdRef = useRef(0);         // bumps each turn so a stale stream can't speak over a new one
   const modeRef = useRef(null);
   const difficultyRef = useRef(3);
   const profileIdxRef = useRef(0);
@@ -221,11 +254,12 @@ function Trainer({ user }) {
   const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
-  const pauseGraceRef = useRef(2000); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
+  const pauseGraceRef = useRef(1000); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
   const watchStopRef = useRef(false); // lets the user stop the Watch-Raja auto-play mid-run
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
-  useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
+  useEffect(() => { callStateRef.current = callState; }, [callState]);
+  useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace2', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
   useEffect(() => { profileIdxRef.current = profileIdx; }, [profileIdx]);
 
@@ -274,8 +308,38 @@ function Trainer({ user }) {
   const pickVoice = useCallback(() => {
     const vs = voicesRef.current;
     if (!vs || !vs.length) return null;
-    if (selectedVoiceName) { const f = vs.find((v) => v.name === selectedVoiceName); if (f) return f; }
-    return vs.find((v) => v.lang.startsWith('en')) || vs[0];
+    const en = vs.filter((v) => v.lang && v.lang.toLowerCase().startsWith('en'));
+    const pool = en.length ? en : vs;
+
+    // Whose voice are we speaking? Match the character's gender:
+    //   Raja = male; roleplay prospect = the profile's gender. (Drill / seeded = no
+    //   known gender, so fall back to the user's chosen voice / default.)
+    let want = null;
+    if (modeRef.current === 'raja') want = 'male';
+    else if (modeRef.current === 'roleplay' && !seedRef.current) {
+      want = PROSPECT_PROFILES[profileIdxRef.current]?.gender || null;
+    }
+
+    if (want) {
+      const matches = pool.filter((v) => voiceGender(v.name) === want);
+      if (matches.length) {
+        // Honor a manually-chosen voice only if it's the right gender.
+        if (selectedVoiceName) { const f = matches.find((v) => v.name === selectedVoiceName); if (f) return f; }
+        // Otherwise prefer the most natural-sounding US voice of that gender.
+        const score = (v) => {
+          const n = v.name.toLowerCase(); let s = 0;
+          if (/(natural|neural|online)/.test(n)) s += 4;
+          if (/google/.test(n)) s += 2;
+          if (v.lang && v.lang.toLowerCase() === 'en-us') s += 1;
+          return s;
+        };
+        return matches.slice().sort((a, b) => score(b) - score(a))[0];
+      }
+      // No voice of the wanted gender exists on this device — fall through to default.
+    }
+
+    if (selectedVoiceName) { const f = pool.find((v) => v.name === selectedVoiceName); if (f) return f; }
+    return pool[0];
   }, [selectedVoiceName]);
 
   const stopSpeaking = useCallback(() => {
@@ -302,6 +366,90 @@ function Trainer({ user }) {
     };
     next();
   }, [voiceEnabled, pickVoice]);
+
+  /* ---------- streaming speech queue (live call mode) ---------- */
+  // Plays queued sentences one after another. New sentences can be pushed mid-playback,
+  // so the AI starts talking on sentence #1 while #2+ are still being generated.
+  const pumpSpeech = useCallback(() => {
+    const items = sqItemsRef.current;
+    if (!items.length) {
+      sqSpeakingRef.current = false;
+      if (sqDoneRef.current && sqDrainRef.current) { const cb = sqDrainRef.current; sqDrainRef.current = null; cb(); }
+      return;
+    }
+    sqSpeakingRef.current = true;
+    const text = items.shift();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice(); if (v) u.voice = v;
+    u.rate = calibRef.current.rate || 1.0;
+    u.pitch = calibRef.current.pitch || 1.0;
+    u.onend = () => pumpSpeech();
+    u.onerror = () => pumpSpeech();
+    if (synthRef.current) synthRef.current.speak(u); else pumpSpeech();
+  }, [pickVoice]);
+
+  const resetSpeechQueue = useCallback(() => {
+    sqItemsRef.current = [];
+    sqDoneRef.current = false;
+    sqDrainRef.current = null;
+    sqSpeakingRef.current = false;
+    if (synthRef.current) synthRef.current.cancel();
+  }, []);
+
+  const enqueueSpeak = useCallback((text) => {
+    if (!voiceEnabled || !synthRef.current) return;
+    const t = (text || '').trim();
+    if (!t) return;
+    sqItemsRef.current.push(t);
+    if (!sqSpeakingRef.current) pumpSpeech();
+  }, [voiceEnabled, pumpSpeech]);
+
+  // Tell the queue the model is done streaming. onDrain fires once everything queued
+  // has actually been spoken (or immediately if nothing is left to say).
+  const finishSpeechStream = useCallback((onDrain) => {
+    sqDoneRef.current = true;
+    sqDrainRef.current = onDrain || null;
+    if (!sqSpeakingRef.current && !sqItemsRef.current.length) {
+      sqDrainRef.current = null;
+      if (onDrain) onDrain();
+    }
+  }, []);
+
+  /* ---------- barge-in: listen while the AI is speaking ---------- */
+  const stopBargeListen = useCallback(() => {
+    if (bargeRecRef.current) { try { bargeRecRef.current.abort(); } catch (e) {} bargeRecRef.current = null; }
+  }, []);
+
+  const startBargeListen = useCallback((speakSince) => {
+    if (!AUTO_BARGE) return;
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) return;
+    stopBargeListen();
+    const r = new SR();
+    r.continuous = true; r.interimResults = true; r.lang = 'en-US'; r.maxAlternatives = 1;
+    r.onresult = (e) => {
+      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+        if (!e.results[i].isFinal) continue;
+        const txt = (e.results[i][0].transcript || '').trim();
+        const words = txt.split(/\s+/).filter(Boolean).length;
+        // Only treat it as a real interruption if the AI has been talking for a beat
+        // and the listener heard a genuine phrase (≥3 words) — keeps speaker echo from
+        // self-interrupting.
+        if (callActiveRef.current && callStateRef.current === 'speaking'
+            && (Date.now() - speakSince) > 800 && words >= 3) {
+          stopBargeListen();
+          resetSpeechQueue();
+          setLiveTranscript('');
+          if (handleTurnRef.current) handleTurnRef.current(txt);
+          return;
+        }
+      }
+    };
+    r.onerror = () => {};
+    r.onend = () => {};
+    bargeRecRef.current = r;
+    try { r.start(); } catch (e) {}
+  }, [stopBargeListen, resetSpeechQueue]);
 
   /* ---------- voice calibration ---------- */
   const applyCalib = useCallback((next) => {
@@ -436,16 +584,40 @@ function Trainer({ user }) {
     }
   };
 
-  // FIX #1 continued: handleTurn reads from refs, not stale state
+  // FIX #1 continued: handleTurn reads from refs, not stale state.
+  // Streaming version: speaks each sentence the moment it's complete, then listens
+  // again as soon as the spoken queue drains. myTurn guards against a slow stream
+  // speaking over a newer turn (e.g. after a barge-in).
   handleTurnRef.current = async (text) => {
     if (!callActiveRef.current) return;
+    const myTurn = (turnIdRef.current += 1);
     setCallState('thinking'); setLiveTranscript('');
-    const reply = await sendTextFromRef(text);
-    if (!callActiveRef.current) return;
-    if (!reply) { setCallState('listening'); if (startListeningRef.current) startListeningRef.current(); return; }
-    setCallState('speaking');
-    speak(reply, () => {
-      if (!callActiveRef.current) return;
+    resetSpeechQueue();
+    let speakSince = 0;
+    let started = false;
+    const reply = await sendTextStreamingFromRef(text, {
+      turnId: myTurn,
+      onSentence: (s) => {
+        if (!callActiveRef.current || turnIdRef.current !== myTurn) return;
+        if (!started) {
+          started = true;
+          speakSince = Date.now();
+          setCallState('speaking');
+          startBargeListen(speakSince);
+        }
+        enqueueSpeak(s);
+      },
+    });
+    if (!callActiveRef.current || turnIdRef.current !== myTurn) return;
+    if (reply == null) {
+      stopBargeListen();
+      setCallState('listening');
+      if (startListeningRef.current) startListeningRef.current();
+      return;
+    }
+    finishSpeechStream(() => {
+      if (!callActiveRef.current || turnIdRef.current !== myTurn) return;
+      stopBargeListen();
       setCallState('listening');
       if (startListeningRef.current) startListeningRef.current();
     });
@@ -471,17 +643,25 @@ function Trainer({ user }) {
 
   const endCall = useCallback(() => {
     callActiveRef.current = false;
+    turnIdRef.current += 1; // invalidate any in-flight stream
     if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
     if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
+    stopBargeListen();
+    resetSpeechQueue();
     stopSpeaking();
     setCallMode(false); setCallState('idle'); setLiveTranscript(''); setCallError('');
-  }, [stopSpeaking]);
+  }, [stopSpeaking, stopBargeListen, resetSpeechQueue]);
 
+  // Manual interrupt (tap the speaking indicator): stop talking and listen now.
   const bargeIn = useCallback(() => {
     if (callState !== 'speaking') return;
-    stopSpeaking(); setCallState('listening');
+    turnIdRef.current += 1; // invalidate the in-flight stream so it can't resume speaking
+    stopBargeListen();
+    resetSpeechQueue();
+    stopSpeaking();
+    setCallState('listening');
     if (startListeningRef.current) startListeningRef.current();
-  }, [callState, stopSpeaking]);
+  }, [callState, stopSpeaking, stopBargeListen, resetSpeechQueue]);
 
   /* ---------- push-to-talk (text mode) ---------- */
   const startListening = useCallback(() => {
@@ -682,6 +862,86 @@ function Trainer({ user }) {
     if (modeRef.current === 'drill' && drillScore != null) {
       setDrillProgress(drillScore);
     }
+
+    const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
+    setMessages(finalMsgs);
+
+    let nextRounds = roundsRef.current;
+    if (modeRef.current === 'drill') {
+      const s = parseScores(reply);
+      if (s) { nextRounds = [...nextRounds, s]; setRounds(nextRounds); }
+    }
+    await saveSession(finalMsgs, nextRounds);
+    setLoading(false);
+    return reply;
+  }, [buildSystem, saveSession, stopSpeaking, stripProgressTags, showCongrats]);
+
+  /* ---------- send (streaming, for live call mode) ---------- */
+  // Same brain and post-processing as sendTextFromRef, but streams the reply and
+  // hands each completed sentence to onSentence so it can be spoken immediately.
+  const sendTextStreamingFromRef = useCallback(async (text, { onSentence, turnId } = {}) => {
+    const t = (text || '').trim();
+    if (!t) return null;
+    stopSpeaking();
+    setApiError('');
+
+    const sid = sessionRef.current.id;
+    // Stale if the session restarted OR a newer turn took over (e.g. a barge-in).
+    const stale = () => sessionRef.current.id !== sid || (turnId != null && turnIdRef.current !== turnId);
+    const curMsgs = messagesRef.current;
+    const userMsg = { role: 'user', content: t };
+    const newMsgs = [...curMsgs, userMsg];
+    setMessages(newMsgs); setLoading(true);
+
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + CALL_BREVITY;
+
+    // Pull complete sentences out of the growing raw text and speak them. Progress
+    // tags like [WHY_PROGRESS:n] are stripped from spoken audio (kept in raw for parsing).
+    let raw = '';
+    let spokenIdx = 0;
+    const flush = (final) => {
+      while (true) {
+        const rest = raw.slice(spokenIdx);
+        const m = rest.match(/^[\s\S]*?[.!?]+["')\]]*\s/);
+        if (!m) break;
+        spokenIdx += m[0].length;
+        const spoken = cleanForSpeech(m[0].replace(/\[[^\]]*\]/g, ' '));
+        if (spoken && onSentence) onSentence(spoken);
+      }
+      if (final) {
+        const tail = cleanForSpeech(raw.slice(spokenIdx).replace(/\[[^\]]*\]/g, ' '));
+        spokenIdx = raw.length;
+        if (tail && onSentence) onSentence(tail);
+      }
+    };
+
+    let result = await callAPIStream(
+      newMsgs.map((m) => ({ role: m.role, content: m.content })),
+      sys,
+      { onDelta: (d) => { raw += d; flush(false); }, max_tokens: 320 }
+    );
+
+    // Stream failed before producing anything → fall back to the non-streaming brain.
+    if (!result.ok && !raw) {
+      const fb = await callAPI(newMsgs.map((m) => ({ role: m.role, content: m.content })), sys);
+      if (stale()) return null;
+      if (!fb.ok) { setApiError(fb.error || 'Something went wrong. Try again.'); setLoading(false); return null; }
+      raw = fb.text;
+    }
+    if (stale()) return null;
+    flush(true); // speak whatever sentence(s) remain
+
+    if (stale()) return null;
+
+    let reply = raw;
+    const { clean, whyScore, drillScore } = stripProgressTags(reply);
+    reply = clean;
+    if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
+      setWhyProgress(whyScore);
+      if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
+      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
+    }
+    if (modeRef.current === 'drill' && drillScore != null) setDrillProgress(drillScore);
 
     const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
     setMessages(finalMsgs);
@@ -1070,17 +1330,17 @@ function Trainer({ user }) {
               <div style={S.cardDesc}>Full voice roleplay. A real prospect talks, you talk back. Run PPF discovery, bridge to NAOL, handle whatever they throw.</div>
               <div style={S.cardTag}>CONVERSATION MUSCLE</div>
             </button>
-            <button style={S.card} onClick={() => startSession('drill', difficulty)}>
-              <div style={S.cardIcon}>💥</div>
-              <div style={S.cardTitle}>THE GAUNTLET</div>
-              <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
-              <div style={S.cardTag}>PATTERN RECOGNITION</div>
-            </button>
             <button style={S.card} onClick={() => startSession('raja', difficulty)}>
               <div style={S.cardIcon}>🧑‍🏫</div>
               <div style={S.cardTitle}>LEARN FROM RAJA</div>
               <div style={S.cardDesc}>Flip the script. Raja, a master rep, runs the call and YOU play the client. Feel elite discovery, the WHY, and objection handling done right.</div>
               <div style={S.cardTag}>WATCH THE MASTER</div>
+            </button>
+            <button style={S.card} onClick={() => startSession('drill', difficulty)}>
+              <div style={S.cardIcon}>💥</div>
+              <div style={S.cardTitle}>THE GAUNTLET</div>
+              <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
+              <div style={S.cardTag}>PATTERN RECOGNITION</div>
             </button>
           </div>
 
@@ -1269,7 +1529,7 @@ function Trainer({ user }) {
             </div>
             <div style={S.settingLabel}>PAUSE BEFORE REPLY</div>
             <div style={S.diffMini}>
-              {[1000, 2000, 3000].map((ms) => (
+              {[700, 1000, 1500, 2500].map((ms) => (
                 <button key={ms} onClick={() => setPauseGrace(ms)}
                   style={{ ...S.diffMiniBtn, borderColor: pauseGrace === ms ? '#D4A843' : '#2A3A4A', background: pauseGrace === ms ? '#D4A843' : 'transparent', color: pauseGrace === ms ? '#0F1419' : '#8899A6' }}>
                   {ms / 1000}s
@@ -1732,7 +1992,7 @@ const S = {
   diffNum: { fontSize: 16, fontWeight: 800 },
   diffName: { fontSize: 10, letterSpacing: '1px', fontWeight: 600 },
 
-  cardRow: { display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 720 },
+  cardRow: { display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 1000 },
   card: { background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: '30px 24px', width: 310, cursor: 'pointer', textAlign: 'left', color: '#E8E6E1', transition: 'border-color .2s, transform .2s', fontFamily: 'inherit' },
   cardIcon: { fontSize: 30, marginBottom: 14 },
   cardTitle: { fontSize: 18, fontWeight: 700, letterSpacing: '2px', marginBottom: 12, color: '#D4A843' },

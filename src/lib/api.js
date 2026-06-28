@@ -57,3 +57,55 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
   }
   return { ok: false, error: lastError, status: 0 };
 }
+
+// Streaming variant for live call mode. Hits /api/chat-stream (Groq-first) and
+// invokes onDelta(textChunk) as tokens arrive so the caller can speak sentences
+// the instant they're complete. Returns { ok, text } with the full accumulated
+// reply. If the stream fails entirely the caller should fall back to callAPI.
+export async function callAPIStream(msgs, system, { onDelta, max_tokens = 320, timeoutMs = 90000 } = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let text = '';
+  try {
+    const res = await fetch('/api/chat-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({
+        system,
+        messages: (msgs || []).map((m) => ({ role: m.role, content: m.content })),
+        max_tokens,
+      }),
+    });
+    if (!res.ok || !res.body) { clearTimeout(timer); return { ok: false, text: '', status: res.status }; }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n\n')) >= 0) {
+        const frame = buf.slice(0, idx); buf = buf.slice(idx + 2);
+        for (const line of frame.split('\n')) {
+          const s = line.trim();
+          if (!s.startsWith('data:')) continue;
+          const payload = s.slice(5).trim();
+          if (payload === '[DONE]') continue;
+          try {
+            const obj = JSON.parse(payload);
+            if (obj.text) { text += obj.text; if (onDelta) onDelta(obj.text); }
+          } catch (e) { /* ignore partial frame */ }
+        }
+      }
+    }
+    clearTimeout(timer);
+    return text ? { ok: true, text } : { ok: false, text: '', status: 502 };
+  } catch (err) {
+    clearTimeout(timer);
+    console.error('API stream error:', err);
+    return { ok: false, text, status: err.name === 'AbortError' ? 408 : 0 };
+  }
+}

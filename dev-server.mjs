@@ -17,10 +17,12 @@ if (fs.existsSync(envPath)) {
 }
 
 const { default: chatHandler } = await import('./api/chat.js');
+const { default: chatStreamHandler } = await import('./api/chat-stream.js');
 const { default: adminHandler } = await import('./api/admin.js');
 const { default: statsHandler } = await import('./api/stats.js');
 
 const handlers = {
+  '/api/chat-stream': chatStreamHandler,
   '/api/chat': chatHandler,
   '/api/admin': adminHandler,
   '/api/stats': statsHandler,
@@ -52,6 +54,11 @@ http
           res.end(JSON.stringify(data));
           return vercelRes;
         },
+        // --- streaming passthrough (used by /api/chat-stream) ---
+        setHeader(k, v) { res.setHeader(k, v); return vercelRes; },
+        flushHeaders() { if (res.flushHeaders) res.flushHeaders(); return vercelRes; },
+        write(chunk) { return res.write(chunk); },
+        end(chunk) { res.end(chunk); return vercelRes; },
       };
       try {
         await handlers[route](req, vercelRes);
