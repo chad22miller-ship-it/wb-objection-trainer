@@ -38,14 +38,19 @@ const voiceGender = (name) => {
   return null;
 };
 
-// Keep the API payload bounded on long (20-min+) calls: send only the most recent
-// turns (the persona/profile lives in the system prompt, so older turns aren't
-// needed for consistency). Full history is still kept in state for the debrief.
-const trimForApi = (msgs, keep = 30) => {
+// Bound the API payload on very long calls WITHOUT breaking continuity: keep the
+// opening turns (where the prospect first reveals name / job / family) plus the most
+// recent turns, so the model never "forgets" something it disclosed earlier (e.g. its
+// kids) and contradict itself. Normal-length calls (<= keep) are sent in full. Full
+// history is always kept in state for the debrief.
+const trimForApi = (msgs, keep = 70) => {
   if (msgs.length <= keep) return msgs;
-  let t = msgs.slice(-keep);
-  while (t.length && t[0].role !== 'user') t = t.slice(1); // APIs expect history to start on a user turn
-  return t;
+  const head = msgs.slice(0, 6); // opening discovery — durable facts surface here
+  let tail = msgs.slice(-(keep - 6));
+  while (tail.length && tail[0].role !== 'user') tail = tail.slice(1); // clean role seam
+  let out = [...head, ...tail];
+  while (out.length && out[0].role !== 'user') out = out.slice(1); // history starts on a user turn
+  return out;
 };
 
 
@@ -1742,7 +1747,7 @@ function Trainer({ user }) {
               <span style={S.whyBarPct}>{whyProgress * 10}%</span>
             </div>
             <div style={S.whyBarTrack}>
-              <div style={{ ...S.whyBarFill, width: `${whyProgress * 10}%`, background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A' }} />
+              <div style={{ ...S.whyBarFill, width: `${whyProgress * 10}%`, background: whyProgress * 10 >= 95 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A' }} />
             </div>
           </div>
           <div style={S.watchBody}>
@@ -1886,7 +1891,7 @@ function Trainer({ user }) {
             <div style={{
               ...S.whyBarFill,
               width: `${whyProgress * 10}%`,
-              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
+              background: whyProgress * 10 >= 95 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
             }} />
           </div>
           {messages.filter((m) => m.role === 'user').length >= 3 && whyProgress <= 2 ? (
@@ -1969,7 +1974,7 @@ function Trainer({ user }) {
             <div style={{
               ...S.whyBarFill,
               width: `${whyProgress * 10}%`,
-              background: whyProgress >= 8 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
+              background: whyProgress * 10 >= 95 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
             }} />
           </div>
           <div style={S.whyBarHint}>
