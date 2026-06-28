@@ -3,7 +3,7 @@
 // All free tiers. The app should never go down.
 
 import {
-  GEMINI_MODEL, GROQ_MODEL, OPENROUTER_MODEL,
+  GEMINI_MODEL, GROQ_MODEL,
   parseKeys, isReady, setCooldown, coolingCount,
   validateChatBody, buildGeminiBody, toOpenAIMessages,
 } from './_shared.js';
@@ -56,61 +56,6 @@ async function callGroq(apiKey, system, messages, max_tokens) {
   }
 }
 
-async function callOpenRouter(apiKey, system, messages, max_tokens) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 30000);
-  try {
-    const msgs = toOpenAIMessages(system, messages);
-    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': 'https://wb-objection-trainer.vercel.app',
-      },
-      body: JSON.stringify({ model: OPENROUTER_MODEL, messages: msgs, max_tokens }),
-      signal: ac.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return { ok: false, status: res.status };
-    const data = await res.json().catch(() => null);
-    const text = data?.choices?.[0]?.message?.content || '';
-    return text ? { ok: true, text } : { ok: false, status: 502 };
-  } catch (err) {
-    clearTimeout(timer);
-    return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
-  }
-}
-
-async function callAnthropic(apiKey, system, messages, max_tokens) {
-  const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), 50000);
-  try {
-    const res = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens,
-        system: system || '',
-        messages: messages || [],
-      }),
-      signal: ac.signal,
-    });
-    clearTimeout(timer);
-    if (!res.ok) return { ok: false, status: res.status };
-    const data = await res.json().catch(() => null);
-    const text = data?.content?.find((b) => b.type === 'text')?.text || '';
-    return text ? { ok: true, text } : { ok: false, status: 502 };
-  } catch (err) {
-    clearTimeout(timer);
-    return { ok: false, status: err.name === 'AbortError' ? 408 : 500 };
-  }
-}
 
 // --- Cooldown tracking (per serverless instance) — helpers live in _shared.js ---
 const startedAt = Date.now();
@@ -129,16 +74,12 @@ export function getUsageStats() {
 
   const gCool = coolingCount('gemini', geminiKeys.length);
   const qCool = coolingCount('groq', groqKeys.length);
-  const orCool = !isReady('openrouter:0');
-  const anCool = !isReady('anthropic:0');
 
   const geminiFree = geminiKeys.length > 0 && gCool < geminiKeys.length;
   const groqFree = groqKeys.length > 0 && qCool < groqKeys.length;
-  const orFree = !!process.env.OPENROUTER_API_KEY && !orCool;
-  const anFree = !!process.env.ANTHROPIC_API_KEY && !anCool;
 
-  const anythingFree = geminiFree || groqFree || orFree || anFree;
-  const anyCooling = gCool + qCool + (orCool ? 1 : 0) + (anCool ? 1 : 0) > 0;
+  const anythingFree = geminiFree || groqFree;
+  const anyCooling = gCool + qCool > 0;
   const health = !anythingFree ? 'overloaded' : anyCooling ? 'busy' : 'ok';
 
   return {
@@ -159,10 +100,8 @@ export default async function handler(req, res) {
 
   const geminiKeys = parseKeys('GEMINI_API_KEY');
   const groqKeys = parseKeys('GROQ_API_KEY');
-  const openrouterKey = process.env.OPENROUTER_API_KEY;
-  const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
-  const totalProviders = geminiKeys.length + groqKeys.length + (openrouterKey ? 1 : 0) + (anthropicKey ? 1 : 0);
+  const totalProviders = geminiKeys.length + groqKeys.length;
   if (!totalProviders) {
     return res.status(500).json({ error: 'No API keys configured' });
   }
@@ -205,28 +144,6 @@ export default async function handler(req, res) {
         return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
       }
       if (result.status === 429) setCooldown(id, 60000);
-      note(result.status);
-    }
-
-    // --- 3. Try OpenRouter ---
-    if (openrouterKey && isReady('openrouter:0')) {
-      const result = await callOpenRouter(openrouterKey, system, messages, max_tokens);
-      if (result.ok) {
-        console.log('[chat] ✓ OpenRouter');
-        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
-      }
-      if (result.status === 429) setCooldown('openrouter:0', 60000);
-      note(result.status);
-    }
-
-    // --- 4. Try Anthropic ---
-    if (anthropicKey && isReady('anthropic:0')) {
-      const result = await callAnthropic(anthropicKey, system, messages, max_tokens);
-      if (result.ok) {
-        console.log('[chat] ✓ Anthropic');
-        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
-      }
-      if (result.status === 429) setCooldown('anthropic:0', 60000);
       note(result.status);
     }
 
