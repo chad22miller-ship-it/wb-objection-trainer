@@ -433,14 +433,18 @@ function Trainer({ user }) {
         const txt = (e.results[i][0].transcript || '').trim();
         const words = txt.split(/\s+/).filter(Boolean).length;
         // Only treat it as a real interruption if the AI has been talking for a beat
-        // and the listener heard a genuine phrase (≥3 words) — keeps speaker echo from
-        // self-interrupting.
+        // and the listener heard a genuine phrase (≥2 words) — keeps speaker echo from
+        // self-interrupting while still triggering on a quick "wait, stop".
         if (callActiveRef.current && callStateRef.current === 'speaking'
-            && (Date.now() - speakSince) > 800 && words >= 3) {
+            && (Date.now() - speakSince) > 800 && words >= 2) {
+          // Cut the AI off immediately, then hand what you've said so far into the
+          // normal listening loop — it keeps listening and only replies once you
+          // actually stop talking (instead of jumping in after the first few words).
           stopBargeListen();
           resetSpeechQueue();
-          setLiveTranscript('');
-          if (handleTurnRef.current) handleTurnRef.current(txt);
+          turnIdRef.current += 1; // invalidate the interrupted reply
+          setCallState('listening');
+          if (startListeningRef.current) startListeningRef.current(txt);
           return;
         }
       }
@@ -529,7 +533,10 @@ function Trainer({ user }) {
   }, [pickVoice]);
 
   /* ---------- hands-free call mode ---------- */
-  startListeningRef.current = () => {
+  // seed = words already captured before this recognizer started (e.g. from a
+  // barge-in). We keep listening and only send once the user actually pauses, so
+  // the prospect replies to the WHOLE thought, not just the first few words.
+  startListeningRef.current = (seed = '') => {
     if (!callActiveRef.current) return;
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setCallState('error'); setCallError('No speech recognition. Open in Chrome/Edge.'); return; }
@@ -540,17 +547,12 @@ function Trainer({ user }) {
     r.interimResults = true;
     r.lang = 'en-US';
     r.maxAlternatives = 1;
-    let buf = '';
-    let lastResultTime = Date.now();
-    r.onresult = (e) => {
-      lastResultTime = Date.now();
+    let buf = seed ? seed.trim() + ' ' : '';
+    if (buf) setLiveTranscript(buf.trim());
+    // Send `buf` after the silence window. Re-armed on every new bit of speech, so
+    // it only fires once the user has stopped talking.
+    const scheduleSend = (ms) => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
-      let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i += 1) {
-        const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
-      }
-      setLiveTranscript((buf + interim).trim());
       silenceTimerRef.current = setTimeout(() => {
         if (!callActiveRef.current) return;
         const said = buf.trim();
@@ -558,7 +560,16 @@ function Trainer({ user }) {
           if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
           if (handleTurnRef.current) handleTurnRef.current(said);
         }
-      }, pauseGraceRef.current || 2000);
+      }, ms);
+    };
+    r.onresult = (e) => {
+      let interim = '';
+      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+        const t = e.results[i][0].transcript;
+        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
+      }
+      setLiveTranscript((buf + interim).trim());
+      scheduleSend(pauseGraceRef.current || 1000);
     };
     r.onerror = (ev) => {
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
@@ -579,7 +590,12 @@ function Trainer({ user }) {
       else setTimeout(() => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); }, 200);
     };
     callRecRef.current = r;
-    try { r.start(); } catch (e) {
+    try {
+      r.start();
+      // If we started with seeded words (a barge-in), arm a slightly longer initial
+      // window so a continued sentence has time to register before we'd send the seed alone.
+      if (buf) scheduleSend(Math.max(pauseGraceRef.current || 1000, 1300));
+    } catch (e) {
       setTimeout(() => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); }, 300);
     }
   };
