@@ -9,7 +9,7 @@ import {
 } from './lib/speech';
 import {
   SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_RAJA_RECAP, SYSTEM_REDEMPTER, SYSTEM_DEBRIEF,
-  ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT,
+  ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT, SYSTEM_SESSION_ANALYSIS,
   PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
 } from './constants';
 import Auth from './components/Auth';
@@ -231,6 +231,10 @@ function Trainer({ user }) {
   const [patternText, setPatternText] = useState('');
   const [patternLoading, setPatternLoading] = useState(false);
   const [showPattern, setShowPattern] = useState(false);
+  const [analyzeId, setAnalyzeId] = useState(null);   // session id currently being realism-analyzed
+  const [analyzeText, setAnalyzeText] = useState('');
+  const [analyzeLoading, setAnalyzeLoading] = useState(false);
+  const [copiedId, setCopiedId] = useState(null);     // session id whose transcript was just copied
 
   const chatEndRef = useRef(null);
   const watchEndRef = useRef(null);
@@ -1234,6 +1238,45 @@ function Trainer({ user }) {
     setPatternLoading(false);
   }, [history]);
 
+  // Format one session as a plain-text transcript (mode + difficulty + turns + debrief).
+  const formatTranscript = useCallback((s) => {
+    const who = (m) => m.role === 'user'
+      ? 'REP'
+      : (s.mode === 'drill' ? 'PROSPECT(drill)' : s.mode === 'raja' ? 'RAJA' : (s.prospectName || 'PROSPECT'));
+    const head = `MODE: ${s.mode}   DIFFICULTY: ${s.difficulty}${s.prospectName ? `   PROSPECT: ${s.prospectName}` : ''}`;
+    const body = s.messages.map((m) => `${who(m)}: ${m.content}`).join('\n\n');
+    return `${head}\n\n${body}${s.debrief ? `\n\n--- DEBRIEF ---\n${s.debrief}` : ''}`;
+  }, []);
+
+  // Copy a session transcript to the clipboard so it can be pasted into Claude for analysis.
+  const copyTranscript = useCallback(async (s) => {
+    const text = formatTranscript(s);
+    try {
+      await navigator.clipboard.writeText(text);
+    } catch {
+      // Fallback for browsers/contexts without async clipboard access.
+      const ta = document.createElement('textarea');
+      ta.value = text; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); } catch { /* noop */ }
+      document.body.removeChild(ta);
+    }
+    setCopiedId(s.id);
+    setTimeout(() => setCopiedId((c) => (c === s.id ? null : c)), 1800);
+  }, [formatTranscript]);
+
+  // In-app realism QA: send one session to the AI and critique how human the
+  // simulated character felt + what prompt changes would make it more real.
+  const analyzeSession = useCallback(async (s) => {
+    setAnalyzeId(s.id); setAnalyzeText(''); setAnalyzeLoading(true);
+    const transcript = formatTranscript(s).slice(0, 12000);
+    const result = await callAPI(
+      [{ role: 'user', content: `<session_transcript>\n${transcript}\n</session_transcript>\n\nAudit this session.` }],
+      SYSTEM_SESSION_ANALYSIS,
+    );
+    setAnalyzeText(result.ok ? result.text : ('⚠️ ' + (result.error || 'Analysis failed. Try again.')));
+    setAnalyzeLoading(false);
+  }, [formatTranscript]);
+
   const handleLogout = useCallback(async () => {
     if (supabase) await supabase.auth.signOut();
   }, []);
@@ -1376,19 +1419,19 @@ function Trainer({ user }) {
           <div style={S.cardRow}>
             <button style={S.card} onClick={() => startSession('roleplay', difficulty)}>
               <div style={S.cardIcon}>🎭</div>
-              <div style={S.cardTitle}>THE PROSPECT</div>
+              <div style={S.cardTitle}>BELIEVER</div>
               <div style={S.cardDesc}>Full voice roleplay. A real prospect talks, you talk back. Run PPF discovery, bridge to NAOL, handle whatever they throw.</div>
               <div style={S.cardTag}>CONVERSATION MUSCLE</div>
             </button>
             <button style={S.card} onClick={() => startSession('raja', difficulty)}>
               <div style={S.cardIcon}>🧑‍🏫</div>
-              <div style={S.cardTitle}>LEARN FROM RAJA</div>
+              <div style={S.cardTitle}>TRAINER</div>
               <div style={S.cardDesc}>Flip the script. Raja, a master rep, runs the call and YOU play the client. Feel elite discovery, the WHY, and objection handling done right.</div>
               <div style={S.cardTag}>WATCH THE MASTER</div>
             </button>
             <button style={S.card} onClick={() => startSession('drill', difficulty)}>
               <div style={S.cardIcon}>💥</div>
-              <div style={S.cardTitle}>THE GAUNTLET</div>
+              <div style={S.cardTitle}>LEADER</div>
               <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
               <div style={S.cardTag}>PATTERN RECOGNITION</div>
             </button>
@@ -1425,7 +1468,7 @@ function Trainer({ user }) {
           {history.length === 0 && (
             <div style={S.empty}>
               <div style={{ fontSize: 36, marginBottom: 12 }}>📭</div>
-              No reps logged yet. Run a Prospect or Gauntlet session and your history shows up here.
+              No reps logged yet. Run a Believer or Leader session and your history shows up here.
             </div>
           )}
           {history.length > 0 && (
@@ -1441,7 +1484,7 @@ function Trainer({ user }) {
                         <div style={S.statBig}>{stats.overall.toFixed(1)}<span style={S.statBigUnit}>/10</span></div>
                         <div style={S.statMeta}>
                           <div>Overall average</div>
-                          <div style={S.statSub}>{stats.rounds} graded rounds · {stats.drillSessions} Gauntlet sessions</div>
+                          <div style={S.statSub}>{stats.rounds} graded rounds · {stats.drillSessions} Leader sessions</div>
                           {stats.trend != null && (
                             <div style={{ color: stats.trend >= 0 ? '#43A047' : '#E53935', fontSize: 12, fontWeight: 600, marginTop: 4 }}>
                               {stats.trend >= 0 ? '▲' : '▼'} {Math.abs(stats.trend).toFixed(1)} {stats.trend >= 0 ? 'improving' : 'slipping'}
@@ -1484,7 +1527,7 @@ function Trainer({ user }) {
                       <div style={S.sessionTop} onClick={() => setExpanded(isOpen ? null : s.id)}>
                         <div style={S.sessionLeft}>
                           <span style={{ ...S.modePill, background: s.mode === 'drill' ? '#3A2A4A' : '#2A3A4A' }}>
-                            {s.mode === 'drill' ? 'GAUNTLET' : s.mode === 'raja' ? 'RAJA' : 'PROSPECT'}
+                            {s.mode === 'drill' ? 'LEADER' : s.mode === 'raja' ? 'TRAINER' : 'BELIEVER'}
                           </span>
                           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
                           {s.prospectName && <span style={S.prospectTag}>{s.prospectName}</span>}
@@ -1511,6 +1554,25 @@ function Trainer({ user }) {
                               <div style={S.tText}>{s.debrief}</div>
                             </div>
                           )}
+                          <div style={S.analyzeRow}>
+                            <button style={S.analyzeBtn}
+                              disabled={analyzeLoading && analyzeId === s.id}
+                              onClick={(e) => { e.stopPropagation(); analyzeSession(s); }}>
+                              {analyzeLoading && analyzeId === s.id ? '🔍 Analyzing…' : '🔍 Analyze realism'}
+                            </button>
+                            <button style={S.analyzeBtn}
+                              onClick={(e) => { e.stopPropagation(); copyTranscript(s); }}>
+                              {copiedId === s.id ? '✓ Copied — paste into Claude' : '📋 Copy transcript'}
+                            </button>
+                          </div>
+                          {analyzeId === s.id && (analyzeLoading || analyzeText) && (
+                            <div style={S.debriefInHistory}>
+                              <div style={S.coachLabel}>🔍 REALISM ANALYSIS</div>
+                              {analyzeLoading
+                                ? <div style={S.coachText}>Auditing how human this felt…</div>
+                                : <div style={S.coachText}>{analyzeText}</div>}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1534,7 +1596,7 @@ function Trainer({ user }) {
       <div style={S.header}>
         <button style={S.backBtn} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
         <div style={S.headerCenter}>
-          <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : mode === 'raja' ? 'LEARN FROM RAJA' : 'THE GAUNTLET'}</span>
+          <span style={S.headerTitle}>{mode === 'roleplay' ? 'BELIEVER' : mode === 'raja' ? 'TRAINER' : 'LEADER'}</span>
           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
           <span style={S.timerBadge}>{formatTime(elapsed)}</span>
           {mode === 'drill' && rounds.length > 0 && (
@@ -2102,6 +2164,8 @@ const S = {
   watchBody: { flex: 1, overflowY: 'auto', paddingRight: 4 },
   debriefHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 },
   debriefInHistory: { marginTop: 12, padding: '12px 0 0', borderTop: '1px solid #2A3A4A' },
+  analyzeRow: { display: 'flex', gap: 8, marginTop: 12, flexWrap: 'wrap' },
+  analyzeBtn: { flex: '1 1 auto', background: '#1A2332', border: '1px solid #6FA8DC', color: '#6FA8DC', fontSize: 12, fontWeight: 700, padding: '9px 10px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '.5px' },
 
   hintCard: { position: 'fixed', bottom: 80, left: 16, right: 16, background: '#1F2A1A', border: '2px solid #4A5A2A', borderRadius: 12, padding: '14px 16px', maxHeight: '45vh', overflowY: 'auto', zIndex: 40, boxShadow: '0 -8px 30px rgba(0,0,0,.5)' },
   hintHeader: { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 },
