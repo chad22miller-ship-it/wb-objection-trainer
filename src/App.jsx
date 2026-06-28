@@ -38,6 +38,16 @@ const voiceGender = (name) => {
   return null;
 };
 
+// Keep the API payload bounded on long (20-min+) calls: send only the most recent
+// turns (the persona/profile lives in the system prompt, so older turns aren't
+// needed for consistency). Full history is still kept in state for the debrief.
+const trimForApi = (msgs, keep = 30) => {
+  if (msgs.length <= keep) return msgs;
+  let t = msgs.slice(-keep);
+  while (t.length && t[0].role !== 'user') t = t.slice(1); // APIs expect history to start on a user turn
+  return t;
+};
+
 
 function ResetPassword({ onDone }) {
   const [password, setPassword] = useState('');
@@ -223,6 +233,7 @@ function Trainer({ user }) {
   const inputRef = useRef(null);
   const synthRef = useRef(null);
   const voicesRef = useRef([]);
+  const userPickedVoiceRef = useRef(false); // true once the user manually selects a voice
   const recognitionRef = useRef(null);
   const sessionRef = useRef({ id: null, startedAt: null });
   const calibRef = useRef({ pitch: 1.0, rate: 1.0 });
@@ -243,6 +254,7 @@ function Trainer({ user }) {
   const sqSpeakingRef = useRef(false); // is an utterance currently playing
   const sqDoneRef = useRef(false);     // has the model stream finished
   const sqDrainRef = useRef(null);     // callback to fire when queue empties AND stream done
+  const lastSpokenRef = useRef('');    // what the AI is currently saying — used to ignore mic echo
   const bargeRecRef = useRef(null);    // recognizer that listens while the AI speaks (barge-in)
   const callStateRef = useRef('idle'); // mirror of callState for use inside async callbacks
   const turnIdRef = useRef(0);         // bumps each turn so a stale stream can't speak over a new one
@@ -267,7 +279,9 @@ function Trainer({ user }) {
   useEffect(() => {
     synthRef.current = window.speechSynthesis;
     const pickDefault = (vs) => {
-      const pref = ['Natural', 'Neural', 'Google US English', 'Samantha', 'Ava', 'Aria', 'Jenny'];
+      // Prefer Edge's high-quality "Online (Natural)" voices, then any neural voice,
+      // before falling back to the robotic built-in (SAPI) voices.
+      const pref = ['Online (Natural)', 'Natural', 'Neural', 'Google US English', 'Aria', 'Jenny', 'Guy', 'Samantha', 'Ava'];
       for (const p of pref) { const f = vs.find((v) => v.lang.startsWith('en') && v.name.includes(p)); if (f) return f; }
       return vs.find((v) => v.lang.startsWith('en')) || vs[0];
     };
@@ -276,7 +290,9 @@ function Trainer({ user }) {
       const vs = synthRef.current.getVoices().filter((v) => v.lang.startsWith('en'));
       voicesRef.current = vs;
       setVoices(vs);
-      setSelectedVoiceName((prev) => prev || (pickDefault(vs)?.name || ''));
+      // Auto-upgrade to the best default when voices load (Edge's natural voices arrive
+      // late), unless the user has explicitly picked one in settings.
+      setSelectedVoiceName((prev) => (userPickedVoiceRef.current && prev ? prev : (pickDefault(vs)?.name || prev || '')));
     };
     load();
     if (synthRef.current) synthRef.current.onvoiceschanged = load;
@@ -393,6 +409,7 @@ function Trainer({ user }) {
     sqDoneRef.current = false;
     sqDrainRef.current = null;
     sqSpeakingRef.current = false;
+    lastSpokenRef.current = '';
     if (synthRef.current) synthRef.current.cancel();
   }, []);
 
@@ -400,6 +417,9 @@ function Trainer({ user }) {
     if (!voiceEnabled || !synthRef.current) return;
     const t = (text || '').trim();
     if (!t) return;
+    // Remember the AI's words so the barge-in recognizer can tell its own echo
+    // (heard back through the speakers) from the user actually interrupting.
+    lastSpokenRef.current = (lastSpokenRef.current + ' ' + t).slice(-600);
     sqItemsRef.current.push(t);
     if (!sqSpeakingRef.current) pumpSpeech();
   }, [voiceEnabled, pumpSpeech]);
@@ -427,11 +447,16 @@ function Trainer({ user }) {
     stopBargeListen();
     const r = new SR();
     r.continuous = true; r.interimResults = true; r.lang = 'en-US'; r.maxAlternatives = 1;
+    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
     r.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i += 1) {
         if (!e.results[i].isFinal) continue;
         const txt = (e.results[i][0].transcript || '').trim();
         const words = txt.split(/\s+/).filter(Boolean).length;
+        // Echo guard: if what we "heard" is just the AI's own words coming back
+        // through the speakers, ignore it (this is what self-interrupts on laptops).
+        const heard = norm(txt);
+        if (heard && norm(lastSpokenRef.current).includes(heard)) continue;
         // Only treat it as a real interruption if the AI has been talking for a beat
         // and the listener heard a genuine phrase (≥2 words) — keeps speaker echo from
         // self-interrupting while still triggering on a quick "wait, stop".
@@ -837,6 +862,29 @@ function Trainer({ user }) {
       : "\n\nDIRECTIVE (THIS REPLY ONLY): The client's emotional why is clearly established. STOP discovery — your NEXT move is to QUANTIFY: ask them what dollar amount a month would make that dream real. Do NOT ask another feelings question.";
   };
 
+  // Shared post-processing for a model reply (text + streaming paths): strip the
+  // hidden progress tags, update the WHY/drill progress UI, persist, and return the
+  // clean reply text. Callers do their own stale-guard before calling this.
+  const finalizeReply = useCallback(async (rawText, newMsgs) => {
+    const { clean, whyScore, drillScore } = stripProgressTags(rawText);
+    if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
+      setWhyProgress(whyScore);
+      if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
+      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
+    }
+    if (modeRef.current === 'drill' && drillScore != null) setDrillProgress(drillScore);
+    const finalMsgs = [...newMsgs, { role: 'assistant', content: clean }];
+    setMessages(finalMsgs);
+    let nextRounds = roundsRef.current;
+    if (modeRef.current === 'drill') {
+      const s = parseScores(clean);
+      if (s) { nextRounds = [...nextRounds, s]; setRounds(nextRounds); }
+    }
+    await saveSession(finalMsgs, nextRounds);
+    setLoading(false);
+    return clean;
+  }, [saveSession, stripProgressTags, showCongrats]);
+
   /* ---------- send (ref-based for call mode) ---------- */
   const sendTextFromRef = useCallback(async (text) => {
     const t = (text || '').trim();
@@ -852,7 +900,7 @@ function Trainer({ user }) {
 
     const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs);
     const result = await callAPI(
-      newMsgs.map((m) => ({ role: m.role, content: m.content })),
+      trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content })),
       sys
     );
 
@@ -865,32 +913,8 @@ function Trainer({ user }) {
       return null;
     }
 
-    let reply = result.text;
-    const { clean, whyScore, drillScore } = stripProgressTags(reply);
-    reply = clean;
-    if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
-      setWhyProgress(whyScore);
-      // Raja: once the why is established, the phase nudge starts pushing toward the close.
-      if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
-      // Congrats popup only in roleplay (where the rep earned it) — not Raja mode.
-      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
-    }
-    if (modeRef.current === 'drill' && drillScore != null) {
-      setDrillProgress(drillScore);
-    }
-
-    const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
-    setMessages(finalMsgs);
-
-    let nextRounds = roundsRef.current;
-    if (modeRef.current === 'drill') {
-      const s = parseScores(reply);
-      if (s) { nextRounds = [...nextRounds, s]; setRounds(nextRounds); }
-    }
-    await saveSession(finalMsgs, nextRounds);
-    setLoading(false);
-    return reply;
-  }, [buildSystem, saveSession, stopSpeaking, stripProgressTags, showCongrats]);
+    return finalizeReply(result.text, newMsgs);
+  }, [buildSystem, stopSpeaking, finalizeReply]);
 
   /* ---------- send (streaming, for live call mode) ---------- */
   // Same brain and post-processing as sendTextFromRef, but streams the reply and
@@ -909,19 +933,26 @@ function Trainer({ user }) {
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
-    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + CALL_BREVITY;
+    // Drill grades every answer in a fixed "OVERALL: X/10" block. The call-mode
+    // brevity rule suppresses it and the fast Groq stream mangles it, so drill skips
+    // both — see the isDrill branch below.
+    const isDrill = modeRef.current === 'drill';
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + (isDrill ? '' : CALL_BREVITY);
+    const apiMsgs = trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content }));
 
     // Pull complete sentences out of the growing raw text and speak them. Progress
     // tags like [WHY_PROGRESS:n] are stripped from spoken audio (kept in raw for parsing).
     let raw = '';
     let spokenIdx = 0;
+    const sentenceRe = /[.!?]+["')\]]*\s/g; // scanned from spokenIdx via lastIndex — no per-token buffer copy
     const flush = (final) => {
-      while (true) {
-        const rest = raw.slice(spokenIdx);
-        const m = rest.match(/^[\s\S]*?[.!?]+["')\]]*\s/);
-        if (!m) break;
-        spokenIdx += m[0].length;
-        const spoken = cleanForSpeech(m[0].replace(/\[[^\]]*\]/g, ' '));
+      sentenceRe.lastIndex = spokenIdx;
+      let m;
+      while ((m = sentenceRe.exec(raw))) {
+        const end = m.index + m[0].length;
+        const spoken = cleanForSpeech(raw.slice(spokenIdx, end).replace(/\[[^\]]*\]/g, ' '));
+        spokenIdx = end;
+        sentenceRe.lastIndex = spokenIdx;
         if (spoken && onSentence) onSentence(spoken);
       }
       if (final) {
@@ -930,47 +961,41 @@ function Trainer({ user }) {
         if (tail && onSentence) onSentence(tail);
       }
     };
+    // Whole-string sentence split (drill path) — reuse the canonical chunkText splitter.
+    const speakChunks = (str) => {
+      const clean = cleanForSpeech(str.replace(/\[[^\]]*\]/g, ' '));
+      if (clean && onSentence) chunkText(clean).forEach((s) => onSentence(s));
+    };
 
-    let result = await callAPIStream(
-      newMsgs.map((m) => ({ role: m.role, content: m.content })),
-      sys,
-      { onDelta: (d) => { raw += d; flush(false); }, max_tokens: 320 }
-    );
-
-    // Stream failed before producing anything → fall back to the non-streaming brain.
-    if (!result.ok && !raw) {
-      const fb = await callAPI(newMsgs.map((m) => ({ role: m.role, content: m.content })), sys);
+    if (isDrill) {
+      // Use the reliable (Gemini-first) brain so the /10 grading block is well-formed,
+      // and speak only the next prospect's objection — not the grades — aloud.
+      const fb = await callAPI(apiMsgs, sys);
       if (stale()) return null;
       if (!fb.ok) { setApiError(fb.error || 'Something went wrong. Try again.'); setLoading(false); return null; }
       raw = fb.text;
+      speakChunks(raw.replace(/^\s*[A-Z][A-Z &/]+:\s*\d+\s*\/\s*10.*$/gm, ''));
+    } else {
+      let result = await callAPIStream(
+        apiMsgs,
+        sys,
+        { onDelta: (d) => { raw += d; flush(false); }, max_tokens: 320 }
+      );
+      // Stream failed before producing anything → fall back to the non-streaming brain.
+      if (!result.ok && !raw) {
+        const fb = await callAPI(apiMsgs, sys);
+        if (stale()) return null;
+        if (!fb.ok) { setApiError(fb.error || 'Something went wrong. Try again.'); setLoading(false); return null; }
+        raw = fb.text;
+      }
+      if (stale()) return null;
+      flush(true); // speak whatever sentence(s) remain
     }
+
     if (stale()) return null;
-    flush(true); // speak whatever sentence(s) remain
 
-    if (stale()) return null;
-
-    let reply = raw;
-    const { clean, whyScore, drillScore } = stripProgressTags(reply);
-    reply = clean;
-    if ((modeRef.current === 'roleplay' || modeRef.current === 'raja') && whyScore != null) {
-      setWhyProgress(whyScore);
-      if (modeRef.current === 'raja' && whyScore >= 7) whyEstablishedRef.current = true;
-      if (modeRef.current === 'roleplay' && whyScore >= 8 && !showCongrats) setShowCongrats(true);
-    }
-    if (modeRef.current === 'drill' && drillScore != null) setDrillProgress(drillScore);
-
-    const finalMsgs = [...newMsgs, { role: 'assistant', content: reply }];
-    setMessages(finalMsgs);
-
-    let nextRounds = roundsRef.current;
-    if (modeRef.current === 'drill') {
-      const s = parseScores(reply);
-      if (s) { nextRounds = [...nextRounds, s]; setRounds(nextRounds); }
-    }
-    await saveSession(finalMsgs, nextRounds);
-    setLoading(false);
-    return reply;
-  }, [buildSystem, saveSession, stopSpeaking, stripProgressTags, showCongrats]);
+    return finalizeReply(raw, newMsgs);
+  }, [buildSystem, stopSpeaking, finalizeReply]);
 
   const sendMessage = useCallback(async () => {
     const t = input.trim();
@@ -1554,7 +1579,7 @@ function Trainer({ user }) {
             </div>
             <div style={{ fontSize: 10, color: '#6B7785', marginTop: -8, marginBottom: 14, lineHeight: 1.4 }}>How long it waits after you stop talking before it replies. Higher = more room to pause and think mid-sentence.</div>
             <div style={S.settingLabel}>VOICE</div>
-            <select value={selectedVoiceName} onChange={(e) => setSelectedVoiceName(e.target.value)} style={S.voiceSelect}>
+            <select value={selectedVoiceName} onChange={(e) => { userPickedVoiceRef.current = true; setSelectedVoiceName(e.target.value); }} style={S.voiceSelect}>
               {voices.length === 0 && <option>Loading voices…</option>}
               {voices.map((v) => <option key={v.name} value={v.name}>{v.name}</option>)}
             </select>

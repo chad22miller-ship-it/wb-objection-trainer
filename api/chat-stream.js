@@ -16,14 +16,15 @@ const cooldowns = new Map();
 function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
 function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
 
-// Read an OpenAI-style SSE stream (Groq) and re-emit clean {text} events.
-async function pipeOpenAISSE(upstream, res) {
+// Read an upstream SSE stream and re-emit clean {text} events. `extractDelta`
+// pulls the provider-specific text out of each parsed data line (Groq vs Gemini).
+// Mid-stream read failures are caught internally so the caller never falls through
+// to another provider and double-streams a reply.
+async function pipeSSE(upstream, res, extractDelta) {
   const reader = upstream.body.getReader();
   const dec = new TextDecoder();
   let buf = '';
   let wrote = false;
-  // Catch a mid-stream read failure internally and return what we wrote, so the
-  // caller never falls through to another provider and double-streams a reply.
   try {
     while (true) {
       const { value, done } = await reader.read();
@@ -35,10 +36,9 @@ async function pipeOpenAISSE(upstream, res) {
         buf = buf.slice(idx + 1);
         if (!line.startsWith('data:')) continue;
         const p = line.slice(5).trim();
-        if (p === '[DONE]') continue;
+        if (!p || p === '[DONE]') continue;
         try {
-          const obj = JSON.parse(p);
-          const delta = obj.choices?.[0]?.delta?.content || '';
+          const delta = extractDelta(JSON.parse(p));
           if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
         } catch (e) { /* partial/keepalive line — ignore */ }
       }
@@ -47,34 +47,8 @@ async function pipeOpenAISSE(upstream, res) {
   return wrote;
 }
 
-// Read a Gemini SSE stream (alt=sse) and re-emit clean {text} events.
-async function pipeGeminiSSE(upstream, res) {
-  const reader = upstream.body.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  let wrote = false;
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      let idx;
-      while ((idx = buf.indexOf('\n')) >= 0) {
-        const line = buf.slice(0, idx).trim();
-        buf = buf.slice(idx + 1);
-        if (!line.startsWith('data:')) continue;
-        const p = line.slice(5).trim();
-        if (!p) continue;
-        try {
-          const obj = JSON.parse(p);
-          const delta = obj.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
-          if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
-        } catch (e) { /* partial line — ignore */ }
-      }
-    }
-  } catch (e) { /* upstream dropped mid-stream — keep whatever we already sent */ }
-  return wrote;
-}
+const groqDelta = (obj) => obj.choices?.[0]?.delta?.content || '';
+const geminiDelta = (obj) => obj.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
 
 async function streamGroq(apiKey, system, messages, max_tokens, res) {
   const ac = new AbortController();
@@ -91,7 +65,7 @@ async function streamGroq(apiKey, system, messages, max_tokens, res) {
     });
     clearTimeout(timer);
     if (!r.ok || !r.body) return { ok: false, status: r.status };
-    const wrote = await pipeOpenAISSE(r, res);
+    const wrote = await pipeSSE(r, res, groqDelta);
     return { ok: wrote, status: wrote ? 200 : 502 };
   } catch (err) {
     clearTimeout(timer);
@@ -112,7 +86,7 @@ async function streamGemini(apiKey, geminiBody, res) {
     });
     clearTimeout(timer);
     if (!r.ok || !r.body) return { ok: false, status: r.status };
-    const wrote = await pipeGeminiSSE(r, res);
+    const wrote = await pipeSSE(r, res, geminiDelta);
     return { ok: wrote, status: wrote ? 200 : 502 };
   } catch (err) {
     clearTimeout(timer);
