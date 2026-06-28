@@ -10,30 +10,40 @@
 const GEMINI_MODEL = 'gemini-2.5-flash';
 const GROQ_MODEL = 'llama-3.3-70b-versatile';
 
+// Per-instance cooldown so a rate-limited key is skipped for a minute instead of
+// being re-hit on every concurrent request (mirrors api/chat.js).
+const cooldowns = new Map();
+function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
+function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
+
 // Read an OpenAI-style SSE stream (Groq) and re-emit clean {text} events.
 async function pipeOpenAISSE(upstream, res) {
   const reader = upstream.body.getReader();
   const dec = new TextDecoder();
   let buf = '';
   let wrote = false;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const p = line.slice(5).trim();
-      if (p === '[DONE]') continue;
-      try {
-        const obj = JSON.parse(p);
-        const delta = obj.choices?.[0]?.delta?.content || '';
-        if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
-      } catch (e) { /* partial/keepalive line — ignore */ }
+  // Catch a mid-stream read failure internally and return what we wrote, so the
+  // caller never falls through to another provider and double-streams a reply.
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const p = line.slice(5).trim();
+        if (p === '[DONE]') continue;
+        try {
+          const obj = JSON.parse(p);
+          const delta = obj.choices?.[0]?.delta?.content || '';
+          if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
+        } catch (e) { /* partial/keepalive line — ignore */ }
+      }
     }
-  }
+  } catch (e) { /* upstream dropped mid-stream — keep whatever we already sent */ }
   return wrote;
 }
 
@@ -43,24 +53,26 @@ async function pipeGeminiSSE(upstream, res) {
   const dec = new TextDecoder();
   let buf = '';
   let wrote = false;
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += dec.decode(value, { stream: true });
-    let idx;
-    while ((idx = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, idx).trim();
-      buf = buf.slice(idx + 1);
-      if (!line.startsWith('data:')) continue;
-      const p = line.slice(5).trim();
-      if (!p) continue;
-      try {
-        const obj = JSON.parse(p);
-        const delta = obj.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
-        if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
-      } catch (e) { /* partial line — ignore */ }
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) >= 0) {
+        const line = buf.slice(0, idx).trim();
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const p = line.slice(5).trim();
+        if (!p) continue;
+        try {
+          const obj = JSON.parse(p);
+          const delta = obj.candidates?.[0]?.content?.parts?.map((x) => x.text).join('') || '';
+          if (delta) { res.write(`data: ${JSON.stringify({ text: delta })}\n\n`); wrote = true; }
+        } catch (e) { /* partial line — ignore */ }
+      }
     }
-  }
+  } catch (e) { /* upstream dropped mid-stream — keep whatever we already sent */ }
   return wrote;
 }
 
@@ -150,13 +162,21 @@ export default async function handler(req, res) {
   if (res.flushHeaders) res.flushHeaders();
 
   // 1. Groq keys (fast), then 2. Gemini keys. First provider to emit a token wins.
+  // Skip keys that are cooling down from a recent 429 (so 5 concurrent users don't
+  // each waste a round trip re-hitting a rate-limited key), and cool a key on 429.
   for (let i = 0; i < groqKeys.length; i++) {
+    const id = `groq:${i}`;
+    if (!isReady(id)) continue;
     const r = await streamGroq(groqKeys[i], system, messages, max_tokens, res);
     if (r.ok) { res.write('data: [DONE]\n\n'); res.end(); return; }
+    if (r.status === 429) setCooldown(id, 60000);
   }
   for (let i = 0; i < geminiKeys.length; i++) {
+    const id = `gemini:${i}`;
+    if (!isReady(id)) continue;
     const r = await streamGemini(geminiKeys[i], geminiBody, res);
     if (r.ok) { res.write('data: [DONE]\n\n'); res.end(); return; }
+    if (r.status === 429) setCooldown(id, 60000);
   }
 
   res.write(`data: ${JSON.stringify({ error: 'AI is busy. Try again.' })}\n\n`);
