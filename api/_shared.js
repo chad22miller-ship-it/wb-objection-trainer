@@ -21,6 +21,11 @@ export const coolingCount = (prefix, n) => {
   return c;
 };
 
+// Round-robin counter — spreads requests evenly across keys instead of always
+// hammering key 0 until it rate-limits, then key 1, etc.
+let _rr = 0;
+export const roundRobin = (n) => { const i = _rr % n; _rr = (_rr + 1) % 100000; return i; };
+
 // Validate the shared chat request body. Returns { error, status } on failure, or
 // { system, messages, max_tokens } on success. Endpoints pass their own token
 // default/ceiling (chat: 2048/4096, chat-stream: 512/1024).

@@ -4,7 +4,7 @@
 
 import {
   GEMINI_MODEL, GROQ_MODEL,
-  parseKeys, isReady, setCooldown, coolingCount,
+  parseKeys, isReady, setCooldown, coolingCount, roundRobin,
   validateChatBody, buildGeminiBody, toOpenAIMessages,
 } from './_shared.js';
 
@@ -121,8 +121,10 @@ export default async function handler(req, res) {
     let allRateLimited = true;
     const note = (s) => { lastStatus = s; if (s !== 429) allRateLimited = false; };
 
-    // --- 1. Try Groq keys ---
-    for (let i = 0; i < groqKeys.length; i++) {
+    // --- 1. Try Groq keys (round-robin start) ---
+    const groqStart = groqKeys.length > 0 ? roundRobin(groqKeys.length) : 0;
+    for (let j = 0; j < groqKeys.length; j++) {
+      const i = (groqStart + j) % groqKeys.length;
       const id = `groq:${i}`;
       if (!isReady(id)) continue;
       const result = await callGroq(groqKeys[i], system, messages, max_tokens);
@@ -134,8 +136,10 @@ export default async function handler(req, res) {
       note(result.status);
     }
 
-    // --- 2. Try Gemini keys ---
-    for (let i = 0; i < geminiKeys.length; i++) {
+    // --- 2. Try Gemini keys (round-robin start) ---
+    const geminiStart = geminiKeys.length > 0 ? roundRobin(geminiKeys.length) : 0;
+    for (let j = 0; j < geminiKeys.length; j++) {
+      const i = (geminiStart + j) % geminiKeys.length;
       const id = `gemini:${i}`;
       if (!isReady(id)) continue;
       const result = await callGemini(geminiKeys[i], geminiBody);
