@@ -185,20 +185,20 @@ GETTING THE WHY is THE most important metric — it should weigh heaviest in OVE
 
 Be honest, be direct, coach voice. No fluff. If they skipped PPF discovery entirely, call it out hard. If they pitched before establishing a must, say so. If they never locked a next step, that's a fail no matter how good the conversation felt.`;
 
+// Four difficulty tiers, named for the WB rank ladder. Level 1 (Believer) is the
+// gentle on-ramp; levels 2-4 are the three increasing "degrees of hard."
 export const ROLEPLAY_DIFF = {
-  1: "DIFFICULTY — ROOKIE (very easy): You are warm, friendly, and eager. You open up quickly with little prompting. At most one soft objection, and you accept a reasonable answer right away. You lean hard toward yes. Be a bit forgiving so the rep builds confidence.",
-  2: "DIFFICULTY — EASY: You are receptive and positive. You share info without much pushing. One or two mild objections, easily reassured. You lean toward yes.",
-  3: "DIFFICULTY — REALISTIC (forgiving — low skill needed to win): A normal, reasonable person with mild, healthy skepticism. You open up with just decent, honest questions — the rep does NOT have to be perfect or run flawless layered discovery to earn your why. At most one or two standard objections, and a sincere, reasonable answer satisfies you. You give the rep the benefit of the doubt and want to like them. Winnable for an average rep who's simply genuine and asks real questions.",
-  4: "DIFFICULTY — HARD (high skill needed): Genuinely guarded and skeptical. Short, withholding answers until the rep PROVES they actually care through real layered discovery — surface questions get surface answers. You stack multiple objections, test their tonality, and call out anything that feels salesy. Pitch, push, or rush and you get noticeably colder and harder to recover. You only open up and commit if they execute the frameworks well across the whole call.",
-  5: "DIFFICULTY — BRUTAL (hardest — near-elite execution required): Cold, busy, combative, and assuming scam or pyramid from the very first second. Clipped answers, you interrupt, you're hunting for the exit the whole time. Back-to-back hard, stacked objections, and you pounce on any hint of commission breath, scripting, or push. You stay on the line ONLY for elite pullback, real disarming curiosity, perfect tonality, and flawless framework execution. Most reps lose you entirely. Make them fight for every single inch, and only a near-perfect call earns your why.",
+  1: "DIFFICULTY — BELIEVER (very easy — confidence builder): You are warm, friendly, and eager. You open up quickly with little prompting and want this to work. At most one soft objection, and you accept a sincere, reasonable answer right away. You lean hard toward yes. Be forgiving so the rep builds confidence.",
+  2: "DIFFICULTY — TRAINER (realistic — moderate): A normal, reasonable person with mild, healthy skepticism. You open up with decent, honest discovery — the rep does NOT have to be perfect to earn your why. One or two standard objections from the top 5, satisfied by a genuine, thoughtful answer. You give the rep the benefit of the doubt and want to like them. Winnable for an average rep who is simply genuine and asks real questions.",
+  3: "DIFFICULTY — BUILDER (hard — high skill needed): Genuinely guarded and skeptical. Short, withholding answers until the rep PROVES they actually care through real layered discovery — surface questions get surface answers. You stack multiple objections, test their tonality, and call out anything that feels salesy. Pitch, push, or rush and you get noticeably colder and harder to recover. You only open up and commit if they execute the frameworks well across the whole call.",
+  4: "DIFFICULTY — LEADER (hardest — near-elite execution required): Cold, busy, combative, and assuming scam or pyramid from the very first second. Clipped answers, you interrupt, you're hunting for the exit the whole time. Back-to-back hard, stacked objections, and you pounce on any hint of commission breath, scripting, or push. You stay on the line ONLY for elite pullback, real disarming curiosity, perfect tonality, and flawless framework execution. Most reps lose you entirely. Make them fight for every single inch, and only a near-perfect call earns your why.",
 };
 
 export const DRILL_DIFF = {
-  1: "DIFFICULTY — ROOKIE: Soft single objections, early-conversation. Grade generously, round up, encourage heavily.",
-  2: "DIFFICULTY — EASY: Standard single objections, early/mid conversation. Encouraging grading.",
-  3: "DIFFICULTY — REALISTIC (forgiving — low skill needed): Single, fair top-5 objections, early/mid conversation. Grade generously and round up — a sincere, reasonable response that roughly follows the framework scores well. The rep does not need flawless execution to pass.",
-  4: "DIFFICULTY — HARD (high skill needed): Tougher, often stacked objections, later-stage. Strict grading — dock hard for any push energy, skipped discovery, told-instead-of-asked, or filled silence. Only solid, deliberate framework execution scores 7+.",
-  5: "DIFFICULTY — BRUTAL (hardest — near-elite required): Brutal, stacked, hostile objections at the close or from an openly hostile prospect. Ruthless grading — only near-perfect framework execution (agree, isolate, pullback, back to the why, calm tonality, silence discipline) scores 8+. Anything less is mediocre.",
+  1: "DIFFICULTY — BELIEVER (very easy): Soft single objections, early-conversation. Grade generously, round up, encourage heavily.",
+  2: "DIFFICULTY — TRAINER (realistic — moderate): Single, fair top-5 objections, early/mid conversation. Grade fairly but encouragingly — a sincere response that roughly follows the framework scores well. The rep does not need flawless execution to pass.",
+  3: "DIFFICULTY — BUILDER (hard — high skill needed): Tougher, often stacked objections, later-stage. Strict grading — dock hard for any push energy, skipped discovery, told-instead-of-asked, or filled silence. Only solid, deliberate framework execution scores 7+.",
+  4: "DIFFICULTY — LEADER (hardest — near-elite required): Brutal, stacked, hostile objections at the close or from an openly hostile prospect. Ruthless grading — only near-perfect framework execution (agree, isolate, pullback, back to the why, calm tonality, silence discipline) scores 8+. Anything less is mediocre.",
 };
 
 export const HINT_STRATEGY = `You are an elite sales coach for WFG / Wealth Builders whispering in a rep's ear mid-call. Read the transcript. In 2-3 punchy sentences, tell them the exact move to make RIGHT NOW and why. Name the specific tool or phase: PPF Discovery (Past / Present / Future), the bridge to New Art of Living, the Pullback, the Must Conversion (sick-child story / interested vs committed), or the Pain Bridge. Be directive. Do NOT give a word-for-word script — give the strategic read. No preamble.`;
@@ -234,14 +234,52 @@ export const PROSPECT_PROFILES = [
   { name: "Lisa", gender: "female", vibe: "Emotionally raw, terrified of risk", profile: "You are Lisa, 41, recently divorced with two teenagers, a paralegal. SURFACE (what you let out early): 'just trying to get back on my feet' — polite but cautious and a little fragile. HIDDEN WHY (reveal only once the rep earns it with patience and safety — never volunteer it): you're rebuilding your finances alone after the divorce, raw and scared; you crave security but are terrified of risk, so any push or hard sell makes you shut down completely — only patience draws you out." },
 ];
 
+/* ============================== BOOKING SCENARIOS ============================== */
+// How the call got booked — the rep picks this before a Prospect roleplay. It sets
+// the prospect's mental backdrop and starting guard (why they think they're on the
+// phone and what they're bracing for). It is NOT spoken aloud unless it naturally
+// comes up; it colors how warm/wary the prospect is in the opening.
+
+export const BOOKING_SCENARIOS = [
+  {
+    name: "Warm referral",
+    short: "A friend referred you",
+    context: "HOW THIS CALL WAS BOOKED: A mutual friend or family member passed your number to the rep and said you two should talk — you trust that person, so you took the call as a favor, but you're a little fuzzy on what it's actually about. Start polite and reasonably open (the referral buys some goodwill), but you still want to know why you're really on the phone.",
+  },
+  {
+    name: "Social media DM",
+    short: "DM'd you online",
+    context: "HOW THIS CALL WAS BOOKED: The rep messaged you on Instagram/Facebook after you engaged with a post about making extra income or working for yourself. You agreed to a quick call out of curiosity, but part of you is already braced for a pitch or a scam. Start slightly guarded and a touch skeptical about how they found you.",
+  },
+  {
+    name: "Met in person",
+    short: "Met you in person",
+    context: "HOW THIS CALL WAS BOOKED: You met the rep briefly in person — at the gym, a coffee shop, a store, wherever — and gave your number for a quick follow-up. You only half remember the conversation and aren't totally sure what this call is for. Start a little distracted and need a small reminder of who they are before you warm up.",
+  },
+  {
+    name: "Job / hiring ad",
+    short: "Thought it was a job",
+    context: "HOW THIS CALL WAS BOOKED: You responded to what looked like a job posting and you think this is an interview for a position. You may be confused or a bit defensive when it turns out to be a financial opportunity rather than a salaried job. Start in 'interview' mode and react honestly if it's not what you expected.",
+  },
+  {
+    name: "Networking event",
+    short: "Met at an event",
+    context: "HOW THIS CALL WAS BOOKED: You met the rep at a business or networking event, exchanged numbers, and agreed to connect. You expect a professional, peer-to-peer conversation. Start businesslike and fairly open, but you don't like being treated like a mark.",
+  },
+  {
+    name: "Warm market",
+    short: "Someone you know",
+    context: "HOW THIS CALL WAS BOOKED: The rep is someone you already know — a friend, coworker, or acquaintance. You're friendly and relaxed, but quietly wary of being 'sold' by someone you know, and you'll feel a little weird if it gets pushy. Start warm and familiar, but protective of the relationship.",
+  },
+];
+
 /* ============================== DIFFICULTY META ============================== */
 
 export const DIFFICULTY_META = [
-  { level: 1, name: "Rookie", color: "#43A047" },
-  { level: 2, name: "Easy", color: "#7CB342" },
-  { level: 3, name: "Realistic", color: "#D4A843" },
-  { level: 4, name: "Hard", color: "#FB8C00" },
-  { level: 5, name: "Brutal", color: "#E53935" },
+  { level: 1, name: "Believer", color: "#43A047" },
+  { level: 2, name: "Trainer", color: "#D4A843" },
+  { level: 3, name: "Builder", color: "#FB8C00" },
+  { level: 4, name: "Leader", color: "#E53935" },
 ];
 
-export const diffMeta = (n) => DIFFICULTY_META[n - 1] || DIFFICULTY_META[2];
+export const diffMeta = (n) => DIFFICULTY_META[n - 1] || DIFFICULTY_META[1];

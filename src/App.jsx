@@ -10,7 +10,7 @@ import {
 import {
   SYSTEM_ROLEPLAY, SYSTEM_DRILL, SYSTEM_RAJA, SYSTEM_RAJA_RECAP, SYSTEM_REDEMPTER, SYSTEM_DEBRIEF,
   ROLEPLAY_DIFF, DRILL_DIFF, HINT_STRATEGY, HINT_WORDS, PATTERN_PROMPT, SYSTEM_SESSION_ANALYSIS,
-  PROSPECT_PROFILES, DIFFICULTY_META, diffMeta,
+  PROSPECT_PROFILES, BOOKING_SCENARIOS, DIFFICULTY_META, diffMeta,
 } from './constants';
 import Auth from './components/Auth';
 import Admin from './components/Admin';
@@ -152,7 +152,8 @@ export default function App() {
 function Trainer({ user }) {
   const [view, setView] = useState('home');
   const [mode, setMode] = useState(null);
-  const [difficulty, setDifficulty] = useState(3);
+  const [difficulty, setDifficulty] = useState(2);
+  const [bookingIdx, setBookingIdx] = useState(0); // how the Prospect call was booked (sets opening context)
   const [profileIdx, setProfileIdx] = useState(0);
 
   const [messages, setMessages] = useState([]);
@@ -267,7 +268,8 @@ function Trainer({ user }) {
   const callStateRef = useRef('idle'); // mirror of callState for use inside async callbacks
   const turnIdRef = useRef(0);         // bumps each turn so a stale stream can't speak over a new one
   const modeRef = useRef(null);
-  const difficultyRef = useRef(3);
+  const difficultyRef = useRef(2);
+  const bookingRef = useRef(0);
   const profileIdxRef = useRef(0);
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
   const seedProfileRef = useRef(null); // prospect's full hidden profile (PPF) carried into a switched Raja call
@@ -281,6 +283,7 @@ function Trainer({ user }) {
   useEffect(() => { callStateRef.current = callState; }, [callState]);
   useEffect(() => { pauseGraceRef.current = pauseGrace; try { localStorage.setItem('wb_pause_grace3', String(pauseGrace)); } catch (e) {} }, [pauseGrace]);
   useEffect(() => { difficultyRef.current = difficulty; }, [difficulty]);
+  useEffect(() => { bookingRef.current = bookingIdx; }, [bookingIdx]);
   useEffect(() => { profileIdxRef.current = profileIdx; }, [profileIdx]);
 
   /* ---------- voice setup ---------- */
@@ -587,6 +590,7 @@ function Trainer({ user }) {
     const scheduleSend = (ms) => {
       if (silenceTimerRef.current) clearTimeout(silenceTimerRef.current);
       silenceTimerRef.current = setTimeout(() => {
+        silenceTimerRef.current = null; // timer has fired — don't leave a stale id around
         if (!callActiveRef.current) return;
         const said = buf.trim();
         if (said.length > 1) {
@@ -616,6 +620,11 @@ function Trainer({ user }) {
       }
     };
     r.onend = () => {
+      // Only the CURRENT recognizer may auto-restart. When we deliberately abort one
+      // (on a send, a barge-in, or a restart) callRecRef is repointed/nulled — its
+      // late-firing onend must NOT spawn another seeded recognizer, or the same words
+      // get re-seeded and the transcript duplicates (the "answer entered 3×" bug).
+      if (callRecRef.current !== r) return;
       if (!callActiveRef.current) return;
       if (silenceTimerRef.current) return; // a send is already scheduled — let the grace timer fire
       // Recognition ended with no pending send. Do NOT send now — Chrome ends mid-pause
@@ -749,7 +758,7 @@ function Trainer({ user }) {
 
   /* ---------- system prompt builder ---------- */
   const buildSystem = useCallback((m, diff, pIdx) => {
-    if (m === 'drill') return SYSTEM_DRILL + '\n\n' + DRILL_DIFF[diff];
+    if (m === 'drill') return SYSTEM_DRILL + '\n\n' + (DRILL_DIFF[diff] || DRILL_DIFF[2]);
     if (m === 'raja') {
       let sys = SYSTEM_RAJA;
       if (seedRef.current) {
@@ -764,11 +773,13 @@ function Trainer({ user }) {
       }
       return sys;
     }
-    let sys = SYSTEM_ROLEPLAY + '\n\n' + ROLEPLAY_DIFF[diff];
+    let sys = SYSTEM_ROLEPLAY + '\n\n' + (ROLEPLAY_DIFF[diff] || ROLEPLAY_DIFF[2]);
     if (seedRef.current) {
       // Replaying a Raja call: BE the same client, now the trainee runs discovery.
       sys += '\n\nSEEDED STORY — CRITICAL: You are the SAME client from the call below, where a master rep named Raja was selling to YOU. Become that exact client — same name if one was given, same job/money/family details, and the SAME deep emotional WHY you revealed. A trainee rep is now going to run the call and try to uncover everything Raja uncovered. Stay 100% consistent with the story below, but make them EARN it like a real person would: reveal your situation and your WHY only as they ask good, caring, layered questions. Do not dump it all at once. If they get pushy, pitch early, or skip discovery, get guarded and pull back.\n\nPRIOR CALL (you are the CLIENT in it):\n' + seedRef.current;
     } else {
+      const booking = BOOKING_SCENARIOS[bookingRef.current] || BOOKING_SCENARIOS[0];
+      sys += '\n\n' + booking.context;
       sys += '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
     }
     return sys;
@@ -787,6 +798,7 @@ function Trainer({ user }) {
       profileIdx: meta.profileIdx,
       prospectName: meta.prospectName,
       prospectVibe: meta.prospectVibe,
+      booking: meta.booking,
       messages: msgs, rounds: rnds,
       ...keepDebrief,
       ...extra,
@@ -823,6 +835,7 @@ function Trainer({ user }) {
       // When seeded (replaying a prior call) the random profile name is irrelevant — don't store it.
       prospectName: seed ? null : prospect.name,
       prospectVibe: seed ? null : prospect.vibe,
+      booking: (m === 'roleplay' && !seed) ? (BOOKING_SCENARIOS[bookingRef.current]?.name || null) : null,
     };
 
     setMode(m); setDifficulty(diff); setProfileIdx(pIdx); setView('chat');
@@ -1243,7 +1256,7 @@ function Trainer({ user }) {
     const who = (m) => m.role === 'user'
       ? 'REP'
       : (s.mode === 'drill' ? 'PROSPECT(drill)' : s.mode === 'raja' ? 'RAJA' : (s.prospectName || 'PROSPECT'));
-    const head = `MODE: ${s.mode}   DIFFICULTY: ${s.difficulty}${s.prospectName ? `   PROSPECT: ${s.prospectName}` : ''}`;
+    const head = `MODE: ${s.mode}   DIFFICULTY: ${s.difficulty}${s.prospectName ? `   PROSPECT: ${s.prospectName}` : ''}${s.booking ? `   BOOKED VIA: ${s.booking}` : ''}`;
     const body = s.messages.map((m) => `${who(m)}: ${m.content}`).join('\n\n');
     return `${head}\n\n${body}${s.debrief ? `\n\n--- DEBRIEF ---\n${s.debrief}` : ''}`;
   }, []);
@@ -1416,22 +1429,33 @@ function Trainer({ user }) {
             ))}
           </div>
 
+          <div style={S.bookingLabel}>HOW WAS THIS CALL BOOKED? <span style={S.bookingHint}>(sets the opening context for The Prospect)</span></div>
+          <div style={S.bookingSelector}>
+            {BOOKING_SCENARIOS.map((b, i) => (
+              <button key={b.name} onClick={() => setBookingIdx(i)}
+                title={b.context}
+                style={{ ...S.bookingBtn, borderColor: bookingIdx === i ? '#6FA8DC' : '#2A3A4A', background: bookingIdx === i ? '#6FA8DC' : 'transparent', color: bookingIdx === i ? '#0F1419' : '#8899A6' }}>
+                {b.short}
+              </button>
+            ))}
+          </div>
+
           <div style={S.cardRow}>
             <button style={S.card} onClick={() => startSession('roleplay', difficulty)}>
               <div style={S.cardIcon}>🎭</div>
-              <div style={S.cardTitle}>BELIEVER</div>
+              <div style={S.cardTitle}>THE PROSPECT</div>
               <div style={S.cardDesc}>Full voice roleplay. A real prospect talks, you talk back. Run PPF discovery, bridge to NAOL, handle whatever they throw.</div>
               <div style={S.cardTag}>CONVERSATION MUSCLE</div>
             </button>
             <button style={S.card} onClick={() => startSession('raja', difficulty)}>
               <div style={S.cardIcon}>🧑‍🏫</div>
-              <div style={S.cardTitle}>TRAINER</div>
+              <div style={S.cardTitle}>LEARN FROM RAJA</div>
               <div style={S.cardDesc}>Flip the script. Raja, a master rep, runs the call and YOU play the client. Feel elite discovery, the WHY, and objection handling done right.</div>
               <div style={S.cardTag}>WATCH THE MASTER</div>
             </button>
             <button style={S.card} onClick={() => startSession('drill', difficulty)}>
               <div style={S.cardIcon}>💥</div>
-              <div style={S.cardTitle}>LEADER</div>
+              <div style={S.cardTitle}>THE GAUNTLET</div>
               <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
               <div style={S.cardTag}>PATTERN RECOGNITION</div>
             </button>
@@ -1468,7 +1492,7 @@ function Trainer({ user }) {
           {history.length === 0 && (
             <div style={S.empty}>
               <div style={{ fontSize: 36, marginBottom: 12 }}>📭</div>
-              No reps logged yet. Run a Believer or Leader session and your history shows up here.
+              No reps logged yet. Run a Prospect or Gauntlet session and your history shows up here.
             </div>
           )}
           {history.length > 0 && (
@@ -1484,7 +1508,7 @@ function Trainer({ user }) {
                         <div style={S.statBig}>{stats.overall.toFixed(1)}<span style={S.statBigUnit}>/10</span></div>
                         <div style={S.statMeta}>
                           <div>Overall average</div>
-                          <div style={S.statSub}>{stats.rounds} graded rounds · {stats.drillSessions} Leader sessions</div>
+                          <div style={S.statSub}>{stats.rounds} graded rounds · {stats.drillSessions} Gauntlet sessions</div>
                           {stats.trend != null && (
                             <div style={{ color: stats.trend >= 0 ? '#43A047' : '#E53935', fontSize: 12, fontWeight: 600, marginTop: 4 }}>
                               {stats.trend >= 0 ? '▲' : '▼'} {Math.abs(stats.trend).toFixed(1)} {stats.trend >= 0 ? 'improving' : 'slipping'}
@@ -1527,7 +1551,7 @@ function Trainer({ user }) {
                       <div style={S.sessionTop} onClick={() => setExpanded(isOpen ? null : s.id)}>
                         <div style={S.sessionLeft}>
                           <span style={{ ...S.modePill, background: s.mode === 'drill' ? '#3A2A4A' : '#2A3A4A' }}>
-                            {s.mode === 'drill' ? 'LEADER' : s.mode === 'raja' ? 'TRAINER' : 'BELIEVER'}
+                            {s.mode === 'drill' ? 'GAUNTLET' : s.mode === 'raja' ? 'RAJA' : 'PROSPECT'}
                           </span>
                           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
                           {s.prospectName && <span style={S.prospectTag}>{s.prospectName}</span>}
@@ -1596,7 +1620,7 @@ function Trainer({ user }) {
       <div style={S.header}>
         <button style={S.backBtn} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
         <div style={S.headerCenter}>
-          <span style={S.headerTitle}>{mode === 'roleplay' ? 'BELIEVER' : mode === 'raja' ? 'TRAINER' : 'LEADER'}</span>
+          <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : mode === 'raja' ? 'LEARN FROM RAJA' : 'THE GAUNTLET'}</span>
           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
           <span style={S.timerBadge}>{formatTime(elapsed)}</span>
           {mode === 'drill' && rounds.length > 0 && (
@@ -2088,6 +2112,10 @@ const S = {
   diffBtn: { display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 2, border: '1px solid', borderRadius: 8, padding: '8px 14px', cursor: 'pointer', fontFamily: 'inherit', transition: 'all .15s', minWidth: 64 },
   diffNum: { fontSize: 16, fontWeight: 800 },
   diffName: { fontSize: 10, letterSpacing: '1px', fontWeight: 600 },
+  bookingLabel: { fontSize: 11, letterSpacing: '1px', fontWeight: 700, color: '#8899A6', textAlign: 'center', marginTop: -16, marginBottom: 10 },
+  bookingHint: { fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: '#5A6A7A' },
+  bookingSelector: { display: 'flex', gap: 8, marginBottom: 32, flexWrap: 'wrap', justifyContent: 'center' },
+  bookingBtn: { border: '1px solid', borderRadius: 16, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 600, letterSpacing: '.5px', transition: 'all .15s' },
 
   cardRow: { display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 1000 },
   card: { background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: '30px 24px', width: 310, cursor: 'pointer', textAlign: 'left', color: '#E8E6E1', transition: 'border-color .2s, transform .2s', fontFamily: 'inherit' },
