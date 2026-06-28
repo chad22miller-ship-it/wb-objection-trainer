@@ -905,7 +905,7 @@ function Trainer({ user }) {
     );
 
     // Drop the reply if the session was switched/restarted mid-request (stale-write guard).
-    if (sessionRef.current.id !== sid) return null;
+    if (sessionRef.current.id !== sid) { setLoading(false); return null; }
     // Real failure: surface it, don't store/speak/persist an error as a prospect turn.
     if (!result.ok) {
       setApiError(result.error || 'Something went wrong. Try again.');
@@ -971,10 +971,11 @@ function Trainer({ user }) {
       // Use the reliable (Gemini-first) brain so the /10 grading block is well-formed,
       // and speak only the next prospect's objection — not the grades — aloud.
       const fb = await callAPI(apiMsgs, sys);
-      if (stale()) return null;
+      if (stale()) { setLoading(false); return null; }
       if (!fb.ok) { setApiError(fb.error || 'Something went wrong. Try again.'); setLoading(false); return null; }
       raw = fb.text;
-      speakChunks(raw.replace(/^\s*[A-Z][A-Z &/]+:\s*\d+\s*\/\s*10.*$/gm, ''));
+      // Strip the grade lines from speech (allow markdown bold, like parseScores does).
+      speakChunks(raw.replace(/^\s*\**[A-Z][A-Z &/]+\**\s*:?\s*\**\s*\d+\s*\/\s*10.*$/gm, ''));
     } else {
       let result = await callAPIStream(
         apiMsgs,
@@ -984,15 +985,15 @@ function Trainer({ user }) {
       // Stream failed before producing anything → fall back to the non-streaming brain.
       if (!result.ok && !raw) {
         const fb = await callAPI(apiMsgs, sys);
-        if (stale()) return null;
+        if (stale()) { setLoading(false); return null; }
         if (!fb.ok) { setApiError(fb.error || 'Something went wrong. Try again.'); setLoading(false); return null; }
         raw = fb.text;
       }
-      if (stale()) return null;
+      if (stale()) { setLoading(false); return null; }
       flush(true); // speak whatever sentence(s) remain
     }
 
-    if (stale()) return null;
+    if (stale()) { setLoading(false); return null; }
 
     return finalizeReply(raw, newMsgs);
   }, [buildSystem, stopSpeaking, finalizeReply]);
