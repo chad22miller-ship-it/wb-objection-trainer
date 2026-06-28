@@ -7,14 +7,11 @@
 // feel instant. /api/chat (Gemini-first, non-streaming) is still the brain for
 // drills, debriefs, hints, and as the client-side fallback if streaming fails.
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
-
-// Per-instance cooldown so a rate-limited key is skipped for a minute instead of
-// being re-hit on every concurrent request (mirrors api/chat.js).
-const cooldowns = new Map();
-function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
-function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
+import {
+  GEMINI_MODEL, GROQ_MODEL,
+  parseKeys, isReady, setCooldown,
+  validateChatBody, buildGeminiBody, toOpenAIMessages,
+} from './_shared.js';
 
 // Read an upstream SSE stream and re-emit clean {text} events. `extractDelta`
 // pulls the provider-specific text out of each parsed data line (Groq vs Gemini).
@@ -54,9 +51,7 @@ async function streamGroq(apiKey, system, messages, max_tokens, res) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 30000);
   try {
-    const msgs = [];
-    if (system) msgs.push({ role: 'system', content: system });
-    msgs.push(...(messages || []).map((m) => ({ role: m.role, content: m.content })));
+    const msgs = toOpenAIMessages(system, messages);
     const r = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -99,35 +94,19 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
-  const groqKeys = (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const geminiKeys = parseKeys('GEMINI_API_KEY');
+  const groqKeys = parseKeys('GROQ_API_KEY');
   if (!geminiKeys.length && !groqKeys.length) {
     return res.status(500).json({ error: 'No API keys configured' });
   }
 
   const body = req.body || {};
-  const { system } = body;
-  const messages = body.messages;
+  // Validate before we switch to streaming headers (so errors stay JSON).
+  const v = validateChatBody(body, { defaultMax: 512, maxCeil: 1024 });
+  if (v.error) return res.status(v.status).json({ error: v.error });
+  const { system, messages, max_tokens } = v;
 
-  // --- Validate before we switch to streaming headers (so errors stay JSON) ---
-  if (!Array.isArray(messages)) return res.status(400).json({ error: 'messages must be an array' });
-  if (messages.length > 80) return res.status(400).json({ error: 'too many messages' });
-  if (system != null && typeof system !== 'string') return res.status(400).json({ error: 'system must be a string' });
-  const approxSize = (system ? system.length : 0) +
-    messages.reduce((n, m) => n + (typeof m?.content === 'string' ? m.content.length : 0), 0);
-  if (approxSize > 200000) return res.status(413).json({ error: 'request too large' });
-  const max_tokens = Math.min(Math.max(Number(body.max_tokens) || 512, 1), 1024);
-
-  // --- Build Gemini body (mirrors /api/chat) ---
-  const contents = messages.map((m) => ({
-    role: m.role === 'assistant' ? 'model' : 'user',
-    parts: [{ text: typeof m.content === 'string' ? m.content : '' }],
-  }));
-  const geminiBody = {
-    contents,
-    generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingBudget: 0 } },
-  };
-  if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
+  const geminiBody = buildGeminiBody(messages, system, max_tokens);
 
   // --- Switch to SSE ---
   res.setHeader('Content-Type', 'text/event-stream; charset=utf-8');

@@ -363,25 +363,31 @@ function Trainer({ user }) {
     setIsSpeaking(false);
   }, []);
 
+  // Build a configured utterance (voice + calibrated rate/pitch). onEnd runs on both
+  // natural end and error so callers advance their queue either way. Shared by speak()
+  // and the streaming speech queue (pumpSpeech).
+  const makeUtterance = useCallback((text, onEnd) => {
+    const u = new SpeechSynthesisUtterance(text);
+    const v = pickVoice(); if (v) u.voice = v;
+    u.rate = calibRef.current.rate || 1.0;
+    u.pitch = calibRef.current.pitch || 1.0;
+    u.onend = onEnd;
+    u.onerror = onEnd;
+    return u;
+  }, [pickVoice]);
+
   const speak = useCallback((text, onDone) => {
     if (!voiceEnabled || !synthRef.current) { if (onDone) onDone(); return; }
     synthRef.current.cancel();
     const chunks = chunkText(cleanForSpeech(text));
-    const voice = pickVoice();
     setIsSpeaking(true);
     let i = 0;
     const next = () => {
       if (i >= chunks.length) { setIsSpeaking(false); if (onDone) onDone(); return; }
-      const u = new SpeechSynthesisUtterance(chunks[i]);
-      if (voice) u.voice = voice;
-      u.rate = calibRef.current.rate || 1.0;
-      u.pitch = calibRef.current.pitch || 1.0;
-      u.onend = () => { i += 1; next(); };
-      u.onerror = () => { i += 1; next(); };
-      synthRef.current.speak(u);
+      synthRef.current.speak(makeUtterance(chunks[i], () => { i += 1; next(); }));
     };
     next();
-  }, [voiceEnabled, pickVoice]);
+  }, [voiceEnabled, makeUtterance]);
 
   /* ---------- streaming speech queue (live call mode) ---------- */
   // Plays queued sentences one after another. New sentences can be pushed mid-playback,
@@ -395,14 +401,8 @@ function Trainer({ user }) {
     }
     sqSpeakingRef.current = true;
     const text = items.shift();
-    const u = new SpeechSynthesisUtterance(text);
-    const v = pickVoice(); if (v) u.voice = v;
-    u.rate = calibRef.current.rate || 1.0;
-    u.pitch = calibRef.current.pitch || 1.0;
-    u.onend = () => pumpSpeech();
-    u.onerror = () => pumpSpeech();
-    if (synthRef.current) synthRef.current.speak(u); else pumpSpeech();
-  }, [pickVoice]);
+    if (synthRef.current) synthRef.current.speak(makeUtterance(text, () => pumpSpeech())); else pumpSpeech();
+  }, [makeUtterance]);
 
   const resetSpeechQueue = useCallback(() => {
     sqItemsRef.current = [];

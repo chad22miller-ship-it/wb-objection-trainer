@@ -2,9 +2,11 @@
 // Tries: Gemini (multi-key) → Groq (multi-key) → OpenRouter → Anthropic
 // All free tiers. The app should never go down.
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
-const GROQ_MODEL = 'llama-3.3-70b-versatile';
-const OPENROUTER_MODEL = 'meta-llama/llama-3.3-70b-instruct:free';
+import {
+  GEMINI_MODEL, GROQ_MODEL, OPENROUTER_MODEL,
+  parseKeys, isReady, setCooldown, coolingCount,
+  validateChatBody, buildGeminiBody, toOpenAIMessages,
+} from './_shared.js';
 
 // --- Provider call functions ---
 
@@ -36,9 +38,7 @@ async function callGroq(apiKey, system, messages, max_tokens) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 25000);
   try {
-    const msgs = [];
-    if (system) msgs.push({ role: 'system', content: system });
-    msgs.push(...(messages || []).map((m) => ({ role: m.role, content: m.content })));
+    const msgs = toOpenAIMessages(system, messages);
     const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${apiKey}` },
@@ -60,9 +60,7 @@ async function callOpenRouter(apiKey, system, messages, max_tokens) {
   const ac = new AbortController();
   const timer = setTimeout(() => ac.abort(), 30000);
   try {
-    const msgs = [];
-    if (system) msgs.push({ role: 'system', content: system });
-    msgs.push(...(messages || []).map((m) => ({ role: m.role, content: m.content })));
+    const msgs = toOpenAIMessages(system, messages);
     const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
       method: 'POST',
       headers: {
@@ -114,12 +112,8 @@ async function callAnthropic(apiKey, system, messages, max_tokens) {
   }
 }
 
-// --- Cooldown tracking (per serverless instance) ---
-const cooldowns = new Map();
+// --- Cooldown tracking (per serverless instance) — helpers live in _shared.js ---
 const startedAt = Date.now();
-
-function isReady(id) { return Date.now() >= (cooldowns.get(id) || 0); }
-function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
 
 // Honest, per-instance overload signal. Vercel runs many isolated serverless
 // instances that don't share memory, so an exact fleet-wide quota total isn't
@@ -130,18 +124,13 @@ function setCooldown(id, ms) { cooldowns.set(id, Date.now() + ms); }
 //   overloaded = no provider has a free key right now (users may see delays)
 export function getUsageStats() {
   const now = Date.now();
-  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
-  const groqKeys = (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const geminiKeys = parseKeys('GEMINI_API_KEY');
+  const groqKeys = parseKeys('GROQ_API_KEY');
 
-  const coolingCount = (prefix, n) => {
-    let c = 0;
-    for (let i = 0; i < n; i++) if ((cooldowns.get(`${prefix}:${i}`) || 0) > now) c++;
-    return c;
-  };
   const gCool = coolingCount('gemini', geminiKeys.length);
   const qCool = coolingCount('groq', groqKeys.length);
-  const orCool = (cooldowns.get('openrouter:0') || 0) > now;
-  const anCool = (cooldowns.get('anthropic:0') || 0) > now;
+  const orCool = !isReady('openrouter:0');
+  const anCool = !isReady('anthropic:0');
 
   const geminiFree = geminiKeys.length > 0 && gCool < geminiKeys.length;
   const groqFree = groqKeys.length > 0 && qCool < groqKeys.length;
@@ -168,8 +157,8 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: 'Method not allowed' });
   }
 
-  const geminiKeys = (process.env.GEMINI_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
-  const groqKeys = (process.env.GROQ_API_KEY || '').split(',').map((k) => k.trim()).filter(Boolean);
+  const geminiKeys = parseKeys('GEMINI_API_KEY');
+  const groqKeys = parseKeys('GROQ_API_KEY');
   const openrouterKey = process.env.OPENROUTER_API_KEY;
   const anthropicKey = process.env.ANTHROPIC_API_KEY;
 
@@ -180,38 +169,11 @@ export default async function handler(req, res) {
 
   try {
     const body = req.body || {};
-    const { system } = body;
-    const messages = body.messages;
+    const v = validateChatBody(body, { defaultMax: 2048, maxCeil: 4096 });
+    if (v.error) return res.status(v.status).json({ error: v.error });
+    const { system, messages, max_tokens } = v;
 
-    // --- Input validation (reject abusive/malformed payloads with a clean 400) ---
-    if (!Array.isArray(messages)) {
-      return res.status(400).json({ error: 'messages must be an array' });
-    }
-    if (messages.length > 80) {
-      return res.status(400).json({ error: 'too many messages' });
-    }
-    if (system != null && typeof system !== 'string') {
-      return res.status(400).json({ error: 'system must be a string' });
-    }
-    // Cap total payload so a huge paste/transcript can't be used to burn quota.
-    const approxSize = (system ? system.length : 0) +
-      messages.reduce((n, m) => n + (typeof m?.content === 'string' ? m.content.length : 0), 0);
-    if (approxSize > 200000) {
-      return res.status(413).json({ error: 'request too large' });
-    }
-    // Clamp output tokens to a sane ceiling regardless of what the client asked for.
-    const max_tokens = Math.min(Math.max(Number(body.max_tokens) || 2048, 1), 4096);
-
-    // --- Build Gemini body ---
-    const contents = messages.map((m) => ({
-      role: m.role === 'assistant' ? 'model' : 'user',
-      parts: [{ text: typeof m.content === 'string' ? m.content : '' }],
-    }));
-    const geminiBody = {
-      contents,
-      generationConfig: { maxOutputTokens: max_tokens, thinkingConfig: { thinkingBudget: 0 } },
-    };
-    if (system) geminiBody.systemInstruction = { parts: [{ text: system }] };
+    const geminiBody = buildGeminiBody(messages, system, max_tokens);
 
     // Track the most relevant failure so a real outage/bad-key/timeout isn't
     // mislabeled as a rate limit. allRateLimited stays true only if every
