@@ -600,11 +600,16 @@ function Trainer({ user }) {
       }, ms);
     };
     r.onresult = (e) => {
+      // Rebuild from the full results list every time — Chrome sometimes re-delivers
+      // already-finalized results from index 0 (internal session reset in continuous
+      // mode), which causes += accumulation to double/triple the text.
+      let finalText = '';
       let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+      for (let i = 0; i < e.results.length; i += 1) {
         const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
+        if (e.results[i].isFinal) finalText += t + ' '; else interim += t;
       }
+      buf = finalText;
       setLiveTranscript((buf + interim).trim());
       scheduleSend(pauseGraceRef.current || 1000);
     };
@@ -739,11 +744,13 @@ function Trainer({ user }) {
     let buf = '';
     r.onstart = () => setIsListening(true);
     r.onresult = (e) => {
+      let finalText = '';
       let interim = '';
-      for (let i = e.resultIndex; i < e.results.length; i += 1) {
+      for (let i = 0; i < e.results.length; i += 1) {
         const t = e.results[i][0].transcript;
-        if (e.results[i].isFinal) buf += t + ' '; else interim += t;
+        if (e.results[i].isFinal) finalText += t + ' '; else interim += t;
       }
+      buf = finalText;
       setInput((buf + interim).trim());
     };
     r.onend = () => setIsListening(false);
