@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect, useRef } from 'react';
 import { DIFFICULTY_META } from '../constants';
 import { supabase } from '../lib/supabase';
 
@@ -14,6 +14,9 @@ export default function Admin({ onBack }) {
   const [error, setError] = useState('');
   const [expandedRep, setExpandedRep] = useState(null);
   const [expandedSession, setExpandedSession] = useState(null);
+  const [apiStats, setApiStats] = useState(null);
+  const [consoleErrors, setConsoleErrors] = useState([]);
+  const errorsRef = useRef([]);
 
   const fetchData = useCallback(async (code) => {
     setLoading(true);
@@ -54,6 +57,37 @@ export default function Admin({ onBack }) {
     }
     setLoading(false);
   }, []);
+
+  // Capture console errors globally
+  useEffect(() => {
+    const origError = console.error.bind(console);
+    const origWarn = console.warn.bind(console);
+    const push = (level, args) => {
+      const entry = { level, msg: args.map(a => (typeof a === 'object' ? JSON.stringify(a) : String(a))).join(' '), t: new Date().toLocaleTimeString() };
+      errorsRef.current = [entry, ...errorsRef.current].slice(0, 50);
+      setConsoleErrors([...errorsRef.current]);
+    };
+    console.error = (...a) => { push('error', a); origError(...a); };
+    console.warn = (...a) => { push('warn', a); origWarn(...a); };
+    window.onerror = (msg, src, line, col, err) => push('error', [`${msg} (${src}:${line}:${col})`]);
+    window.onunhandledrejection = (e) => push('error', ['Unhandled promise:', e.reason?.message || e.reason]);
+    return () => { console.error = origError; console.warn = origWarn; };
+  }, []);
+
+  // Poll /api/stats every 15s when debug tab is active
+  const fetchStats = useCallback(async () => {
+    try {
+      const r = await fetch('/api/stats');
+      if (r.ok) setApiStats(await r.json());
+    } catch (e) { /* ignore */ }
+  }, []);
+
+  useEffect(() => {
+    if (tab !== 'debug') return;
+    fetchStats();
+    const id = setInterval(fetchStats, 15000);
+    return () => clearInterval(id);
+  }, [tab, fetchStats]);
 
   const handlePinSubmit = (e) => {
     e.preventDefault();
@@ -197,6 +231,7 @@ export default function Admin({ onBack }) {
         <div style={S.tabBar}>
           <button style={tab === 'reps' ? S.tabActive : S.tab} onClick={() => setTab('reps')}>📊 Practice ({repList.length})</button>
           <button style={tab === 'signins' ? S.tabActive : S.tab} onClick={() => setTab('signins')}>👤 Sign-ins ({users.length})</button>
+          <button style={tab === 'debug' ? S.tabActive : S.tab} onClick={() => setTab('debug')}>🔧 Debug</button>
         </div>
 
         {tab === 'signins' && (
@@ -371,6 +406,64 @@ export default function Admin({ onBack }) {
           );
         })}
         </>)}
+
+        {tab === 'debug' && (
+          <div>
+            {/* API Health */}
+            <div style={S.debugSection}>
+              <div style={S.debugTitle}>AI API STATUS <button style={S.debugRefresh} onClick={fetchStats}>↻</button></div>
+              {!apiStats ? <div style={S.debugEmpty}>Loading...</div> : (
+                <div>
+                  <div style={{ ...S.debugHealth, background: apiStats.health === 'ok' ? '#1A3A2A' : apiStats.health === 'busy' ? '#3A2A10' : '#3A1A1A', borderColor: apiStats.health === 'ok' ? '#43A047' : apiStats.health === 'busy' ? '#D4A843' : '#E53935' }}>
+                    <span style={{ color: apiStats.health === 'ok' ? '#43A047' : apiStats.health === 'busy' ? '#D4A843' : '#E53935', fontWeight: 700, fontSize: 13 }}>
+                      {apiStats.health === 'ok' ? '● ALL SYSTEMS GO' : apiStats.health === 'busy' ? '● BUSY — SOME KEYS COOLING' : '● OVERLOADED — ALL KEYS DOWN'}
+                    </span>
+                    <span style={{ color: '#8899A6', fontSize: 11, marginLeft: 12 }}>instance up {apiStats.sinceMins}m</span>
+                  </div>
+                  <div style={S.debugRow}>
+                    <span style={S.debugLabel}>Groq keys</span>
+                    <span style={S.debugVal}>{apiStats.groq.total - apiStats.groq.cooling} ready / {apiStats.groq.total} total ({apiStats.groq.cooling} cooling)</span>
+                  </div>
+                  <div style={S.debugRow}>
+                    <span style={S.debugLabel}>Gemini keys</span>
+                    <span style={S.debugVal}>{apiStats.gemini.total - apiStats.gemini.cooling} ready / {apiStats.gemini.total} total ({apiStats.gemini.cooling} cooling)</span>
+                  </div>
+                  <div style={{ fontSize: 10, color: '#6B7785', marginTop: 6 }}>Auto-refreshes every 15s • Cooldown state is per serverless instance</div>
+                </div>
+              )}
+            </div>
+
+            {/* Console Errors */}
+            <div style={S.debugSection}>
+              <div style={S.debugTitle}>
+                CONSOLE ERRORS / WARNINGS
+                <button style={S.debugRefresh} onClick={() => { errorsRef.current = []; setConsoleErrors([]); }}>Clear</button>
+              </div>
+              {consoleErrors.length === 0
+                ? <div style={S.debugEmpty}>No errors captured yet. Reproduce the issue and they'll appear here.</div>
+                : consoleErrors.map((e, i) => (
+                  <div key={i} style={{ ...S.debugErrRow, borderLeftColor: e.level === 'error' ? '#E53935' : '#D4A843' }}>
+                    <span style={{ color: e.level === 'error' ? '#E53935' : '#D4A843', fontSize: 10, fontWeight: 700, minWidth: 36 }}>{e.level.toUpperCase()}</span>
+                    <span style={{ color: '#8899A6', fontSize: 10, minWidth: 52 }}>{e.t}</span>
+                    <span style={{ color: '#C8D6E5', fontSize: 11, wordBreak: 'break-all' }}>{e.msg}</span>
+                  </div>
+                ))
+              }
+            </div>
+
+            {/* Quick links */}
+            <div style={S.debugSection}>
+              <div style={S.debugTitle}>QUICK DEBUG STEPS</div>
+              <div style={{ color: '#8899A6', fontSize: 12, lineHeight: 1.8 }}>
+                <div>1. Press <strong style={{ color: '#C8D6E5' }}>F12</strong> → Console tab — red errors show here automatically</div>
+                <div>2. Press <strong style={{ color: '#C8D6E5' }}>F12</strong> → Network tab → filter by <strong style={{ color: '#C8D6E5' }}>/api/chat</strong> — check status codes</div>
+                <div>3. A <strong style={{ color: '#E53935' }}>429</strong> means AI rate limited — wait 60s or add more keys</div>
+                <div>4. A <strong style={{ color: '#E53935' }}>401</strong> means a key was deleted — remove it from .env</div>
+                <div>5. Speech not working → must use Chrome or Edge, allow mic</div>
+              </div>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -393,6 +486,15 @@ const S = {
   retryBtn: { background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '8px 16px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
   scroll: { flex: 1, overflowY: 'auto', padding: 16 },
 
+  debugSection: { background: '#161E2B', border: '1px solid #2A3A4A', borderRadius: 10, padding: 16, marginBottom: 14 },
+  debugTitle: { fontSize: 11, fontWeight: 700, color: '#8899A6', letterSpacing: 1, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 8 },
+  debugRefresh: { background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 11, padding: '2px 8px', borderRadius: 4, cursor: 'pointer', fontFamily: 'inherit' },
+  debugHealth: { border: '1px solid', borderRadius: 8, padding: '10px 14px', marginBottom: 10, display: 'flex', alignItems: 'center' },
+  debugRow: { display: 'flex', justifyContent: 'space-between', padding: '5px 0', borderBottom: '1px solid #1A2332' },
+  debugLabel: { color: '#8899A6', fontSize: 12 },
+  debugVal: { color: '#C8D6E5', fontSize: 12, fontWeight: 600 },
+  debugEmpty: { color: '#6B7785', fontSize: 12, fontStyle: 'italic' },
+  debugErrRow: { display: 'flex', gap: 10, padding: '6px 0 6px 10px', borderLeft: '3px solid', borderBottom: '1px solid #1A2332', alignItems: 'flex-start' },
   tabBar: { display: 'flex', gap: 8, marginBottom: 16 },
   tab: { flex: 1, background: '#1A2332', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, fontWeight: 700, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
   tabActive: { flex: 1, background: '#D4A843', border: '1px solid #D4A843', color: '#0F1419', fontSize: 12, fontWeight: 700, padding: '10px 12px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
