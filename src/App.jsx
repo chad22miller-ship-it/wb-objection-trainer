@@ -472,7 +472,7 @@ function Trainer({ user }) {
         // and the listener heard a genuine phrase (≥2 words) — keeps speaker echo from
         // self-interrupting while still triggering on a quick "wait, stop".
         if (callActiveRef.current && callStateRef.current === 'speaking'
-            && (Date.now() - speakSince) > 1500 && words >= 3) {
+            && (Date.now() - speakSince) > 800 && words >= 2) {
           // Cut the AI off immediately, then hand what you've said so far into the
           // normal listening loop — it keeps listening and only replies once you
           // actually stop talking (instead of jumping in after the first few words).
