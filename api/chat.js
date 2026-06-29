@@ -4,7 +4,7 @@
 
 import {
   GEMINI_MODEL, GROQ_MODEL,
-  parseKeys, isReady, setCooldown, coolingCount, roundRobin,
+  parseKeys, isReady, setCooldown, coolingCount, roundRobin, leastCooledIndex,
   validateChatBody, buildGeminiBody, toOpenAIMessages,
 } from './_shared.js';
 
@@ -121,34 +121,62 @@ export default async function handler(req, res) {
     let allRateLimited = true;
     const note = (s) => { lastStatus = s; if (s !== 429) allRateLimited = false; };
 
-    // --- 1. Try Groq keys (round-robin start) ---
-    const groqStart = groqKeys.length > 0 ? roundRobin(groqKeys.length) : 0;
-    for (let j = 0; j < groqKeys.length; j++) {
-      const i = (groqStart + j) % groqKeys.length;
-      const id = `groq:${i}`;
-      if (!isReady(id)) continue;
-      const result = await callGroq(groqKeys[i], system, messages, max_tokens);
-      if (result.ok) {
-        console.log(`[chat] ✓ Groq key${i + 1}`);
-        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+    // --- 1. Try Groq keys (round-robin, least-cooled fallback) ---
+    {
+      const start = roundRobin('groq', groqKeys.length);
+      let tried = false;
+      for (let j = 0; j < groqKeys.length; j++) {
+        const i = (start + j) % groqKeys.length;
+        const id = `groq:${i}`;
+        if (!isReady(id)) continue;
+        tried = true;
+        const result = await callGroq(groqKeys[i], system, messages, max_tokens);
+        if (result.ok) {
+          console.log(`[chat] ✓ Groq key${i + 1}`);
+          return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+        }
+        if (result.status === 429) setCooldown(id, 60000);
+        note(result.status);
       }
-      if (result.status === 429) setCooldown(id, 60000);
-      note(result.status);
+      if (!tried && groqKeys.length > 0) {
+        const i = leastCooledIndex('groq', groqKeys.length);
+        const result = await callGroq(groqKeys[i], system, messages, max_tokens);
+        if (result.ok) {
+          console.log(`[chat] ✓ Groq key${i + 1} (recovered)`);
+          return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+        }
+        if (result.status === 429) setCooldown(`groq:${i}`, 60000);
+        note(result.status);
+      }
     }
 
-    // --- 2. Try Gemini keys (round-robin start) ---
-    const geminiStart = geminiKeys.length > 0 ? roundRobin(geminiKeys.length) : 0;
-    for (let j = 0; j < geminiKeys.length; j++) {
-      const i = (geminiStart + j) % geminiKeys.length;
-      const id = `gemini:${i}`;
-      if (!isReady(id)) continue;
-      const result = await callGemini(geminiKeys[i], geminiBody);
-      if (result.ok) {
-        console.log(`[chat] ✓ Gemini key${i + 1}`);
-        return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+    // --- 2. Try Gemini keys (round-robin, least-cooled fallback) ---
+    {
+      const start = roundRobin('gemini', geminiKeys.length);
+      let tried = false;
+      for (let j = 0; j < geminiKeys.length; j++) {
+        const i = (start + j) % geminiKeys.length;
+        const id = `gemini:${i}`;
+        if (!isReady(id)) continue;
+        tried = true;
+        const result = await callGemini(geminiKeys[i], geminiBody);
+        if (result.ok) {
+          console.log(`[chat] ✓ Gemini key${i + 1}`);
+          return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+        }
+        if (result.status === 429) setCooldown(id, 60000);
+        note(result.status);
       }
-      if (result.status === 429) setCooldown(id, 60000);
-      note(result.status);
+      if (!tried && geminiKeys.length > 0) {
+        const i = leastCooledIndex('gemini', geminiKeys.length);
+        const result = await callGemini(geminiKeys[i], geminiBody);
+        if (result.ok) {
+          console.log(`[chat] ✓ Gemini key${i + 1} (recovered)`);
+          return res.status(200).json({ content: [{ type: 'text', text: result.text }] });
+        }
+        if (result.status === 429) setCooldown(`gemini:${i}`, 60000);
+        note(result.status);
+      }
     }
 
     console.log('[chat] ✗ All providers exhausted, lastStatus=', lastStatus);

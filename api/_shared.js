@@ -21,10 +21,25 @@ export const coolingCount = (prefix, n) => {
   return c;
 };
 
-// Round-robin counter — spreads requests evenly across keys instead of always
-// hammering key 0 until it rate-limits, then key 1, etc.
-let _rr = 0;
-export const roundRobin = (n) => { const i = _rr % n; _rr = (_rr + 1) % 100000; return i; };
+// Per-prefix round-robin counters — each provider rotates independently.
+const _rrMap = new Map();
+export const roundRobin = (prefix, n) => {
+  if (n === 0) return 0;
+  const c = (_rrMap.get(prefix) || 0) % n;
+  _rrMap.set(prefix, c + 1);
+  return c;
+};
+
+// When all keys for a prefix are cooling, return the index whose cooldown
+// expires soonest so we can try it immediately instead of hard-failing.
+export const leastCooledIndex = (prefix, n) => {
+  let best = 0, bestTime = Infinity;
+  for (let i = 0; i < n; i++) {
+    const t = cooldowns.get(`${prefix}:${i}`) || 0;
+    if (t < bestTime) { bestTime = t; best = i; }
+  }
+  return best;
+};
 
 // Validate the shared chat request body. Returns { error, status } on failure, or
 // { system, messages, max_tokens } on success. Endpoints pass their own token
