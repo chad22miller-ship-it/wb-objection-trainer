@@ -49,8 +49,15 @@ export default function Admin({ onBack }) {
       }
 
       const data = await res.json();
-      setSessions(data.sessions || []);
+      const rawSessions = data.sessions || [];
+      setSessions(rawSessions);
       setUsers(data.users || []);
+      if (rawSessions.length === 0) {
+        console.warn('[admin] 0 sessions returned from DB — sessions may be in localStorage only (users not logged in when practicing)');
+      } else {
+        const uids = new Set(rawSessions.map((s) => s.user_id));
+        console.log(`[admin] ${rawSessions.length} sessions from ${uids.size} unique users`);
+      }
       setUnlocked(true);
     } catch (err) {
       setError('Failed to load data');
@@ -94,23 +101,19 @@ export default function Admin({ onBack }) {
     if (pin.trim()) fetchData(pin.trim());
   };
 
-  const reps = {};
-  sessions.forEach((s) => {
-    const key = s.user_id;
-    if (!reps[key]) {
-      reps[key] = { id: key, email: s.user_email, name: s.user_name, sessions: [] };
-    }
-    reps[key].sessions.push(s);
-  });
+  // Build rep list from ALL registered users so every signed-up rep appears,
+  // even those with 0 sessions in Supabase (e.g. sessions still in localStorage).
+  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
 
-  const repList = Object.values(reps).map((rep) => {
+  const repList = users.map((u) => {
+    const repSessions = sessions.filter((s) => s.user_id === u.id);
     const allRounds = [];
     let roleplays = 0;
     let drills = 0;
     let lastActive = null;
     const debriefScores = [];
 
-    rep.sessions.forEach((s) => {
+    repSessions.forEach((s) => {
       const d = s.data;
       if (!d) return;
       if (d.mode === 'drill') drills++;
@@ -121,14 +124,16 @@ export default function Admin({ onBack }) {
       if (t && (!lastActive || t > lastActive)) lastActive = t;
     });
 
-    const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
     const overalls = allRounds.map((r) => r.overall).filter((x) => x != null);
     const half = Math.floor(overalls.length / 2);
     const trend = overalls.length >= 4 ? avg(overalls.slice(half)) - avg(overalls.slice(0, half)) : null;
 
     return {
-      ...rep,
-      totalSessions: rep.sessions.length,
+      id: u.id,
+      email: u.email,
+      name: u.name || u.email.split('@')[0],
+      sessions: repSessions,
+      totalSessions: repSessions.length,
       roleplays,
       drills,
       rounds: allRounds.length,
@@ -144,13 +149,20 @@ export default function Admin({ onBack }) {
     };
   });
 
-  repList.sort((a, b) => (b.lastActive || '').localeCompare(a.lastActive || ''));
+  // Sort: reps who have practiced recently first, then alphabetical for non-practitioners
+  repList.sort((a, b) => {
+    if (a.lastActive && b.lastActive) return b.lastActive.localeCompare(a.lastActive);
+    if (a.lastActive) return -1;
+    if (b.lastActive) return 1;
+    return (a.name || '').localeCompare(b.name || '');
+  });
 
   const practicedIds = new Set(sessions.map((s) => s.user_id));
   const signins = [...users].sort((a, b) => (b.lastSignIn || '').localeCompare(a.lastSignIn || ''));
 
-  const teamAvg = repList.length
-    ? repList.reduce((sum, r) => sum + (r.drillAvg || 0), 0) / repList.filter((r) => r.drillAvg).length || 0
+  const practicedReps = repList.filter((r) => r.totalSessions > 0);
+  const teamAvg = practicedReps.filter((r) => r.drillAvg).length
+    ? practicedReps.reduce((sum, r) => sum + (r.drillAvg || 0), 0) / practicedReps.filter((r) => r.drillAvg).length
     : 0;
   const totalSessions = sessions.length;
   const activeLast7 = repList.filter((r) => {
@@ -260,7 +272,11 @@ export default function Admin({ onBack }) {
         <div style={S.statsRow}>
           <div style={S.statCard}>
             <div style={S.statNum}>{repList.length}</div>
-            <div style={S.statLabel}>Total reps</div>
+            <div style={S.statLabel}>Signed up</div>
+          </div>
+          <div style={S.statCard}>
+            <div style={S.statNum}>{practicedReps.length}</div>
+            <div style={S.statLabel}>Practiced</div>
           </div>
           <div style={S.statCard}>
             <div style={S.statNum}>{activeLast7}</div>
@@ -268,7 +284,7 @@ export default function Admin({ onBack }) {
           </div>
           <div style={S.statCard}>
             <div style={S.statNum}>{totalSessions}</div>
-            <div style={S.statLabel}>Total sessions</div>
+            <div style={S.statLabel}>Sessions</div>
           </div>
           <div style={S.statCard}>
             <div style={{ ...S.statNum, color: teamAvg >= 7 ? '#43A047' : teamAvg >= 5 ? '#D4A843' : '#E53935' }}>
@@ -280,7 +296,7 @@ export default function Admin({ onBack }) {
 
         {/* Rep list */}
         {repList.length === 0 && (
-          <div style={S.empty}>No reps have practiced yet. Share the app URL with your team.</div>
+          <div style={S.empty}>No reps have signed up yet. Share the app URL with your team.</div>
         )}
 
         {repList.map((rep) => {
@@ -302,9 +318,14 @@ export default function Admin({ onBack }) {
                 </div>
                 <div style={S.repRight}>
                   <div style={S.repStats}>
-                    <span style={S.repStat}>{rep.roleplays} prospect{rep.roleplays !== 1 ? 's' : ''}</span>
-                    <span style={S.repStat}>{rep.drills} gauntlet{rep.drills !== 1 ? 's' : ''}</span>
-                    <span style={S.repStat}>{rep.rounds} rounds</span>
+                    {rep.totalSessions === 0
+                      ? <span style={{ ...S.repStat, color: '#5A6A7A', fontStyle: 'italic' }}>hasn't practiced yet</span>
+                      : <>
+                          <span style={S.repStat}>{rep.roleplays} prospect{rep.roleplays !== 1 ? 's' : ''}</span>
+                          <span style={S.repStat}>{rep.drills} gauntlet{rep.drills !== 1 ? 's' : ''}</span>
+                          <span style={S.repStat}>{rep.rounds} rounds</span>
+                        </>
+                    }
                   </div>
                   <div style={S.repScoreRow}>
                     {rep.drillAvg != null && (
@@ -348,6 +369,11 @@ export default function Admin({ onBack }) {
                   )}
 
                   <div style={S.sessionLabel}>SESSIONS ({rep.sessions.length})</div>
+                  {rep.sessions.length === 0 && (
+                    <div style={{ color: '#5A6A7A', fontSize: 12, fontStyle: 'italic', padding: '8px 0' }}>
+                      No sessions recorded yet. Sessions sync here when the rep is logged in while practicing.
+                    </div>
+                  )}
                   {rep.sessions.map((s) => {
                     const d = s.data || {};
                     const dm = diffMeta(d.difficulty);
@@ -409,6 +435,27 @@ export default function Admin({ onBack }) {
 
         {tab === 'debug' && (
           <div>
+            {/* Database counts */}
+            <div style={S.debugSection}>
+              <div style={S.debugTitle}>DATABASE (Supabase sessions table)</div>
+              <div style={S.debugRow}>
+                <span style={S.debugLabel}>Sessions in DB</span>
+                <span style={{ ...S.debugVal, color: sessions.length === 0 ? '#E53935' : '#43A047' }}>{sessions.length}</span>
+              </div>
+              <div style={S.debugRow}>
+                <span style={S.debugLabel}>Unique reps in DB</span>
+                <span style={S.debugVal}>{new Set(sessions.map((s) => s.user_id)).size}</span>
+              </div>
+              <div style={S.debugRow}>
+                <span style={S.debugLabel}>Registered accounts</span>
+                <span style={S.debugVal}>{users.length}</span>
+              </div>
+              {sessions.length === 0 && (
+                <div style={{ color: '#D4A843', fontSize: 11, marginTop: 8, lineHeight: 1.6 }}>
+                  ⚠️ Zero sessions in Supabase. Most likely cause: reps practiced while not logged in, so sessions saved to their browser's localStorage only — the admin can't see those. Tell reps to log in before practicing.
+                </div>
+              )}
+            </div>
             {/* API Health */}
             <div style={S.debugSection}>
               <div style={S.debugTitle}>AI API STATUS <button style={S.debugRefresh} onClick={fetchStats}>↻</button></div>

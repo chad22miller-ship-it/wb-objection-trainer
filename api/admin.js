@@ -58,8 +58,11 @@ export default async function handler(req, res) {
     const { data, error } = await serviceClient.rpc('get_all_sessions');
     if (error) {
       console.error('Admin RPC error:', error);
-      return res.status(500).json({ error: 'Failed to fetch sessions' });
+      return res.status(500).json({ error: 'Failed to fetch sessions', detail: error.message });
     }
+    console.log(`[admin] get_all_sessions returned ${(data || []).length} rows`);
+    const uniqueUsers = new Set((data || []).map((s) => s.user_id)).size;
+    console.log(`[admin] unique user_ids: ${uniqueUsers}`);
 
     // Also return the account list (sign-ins) so the admin can see who has an
     // account and when they last logged in — including people who haven't practiced.
