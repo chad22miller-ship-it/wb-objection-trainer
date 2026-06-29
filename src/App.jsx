@@ -189,8 +189,8 @@ function Trainer({ user }) {
   // Silence window after you stop talking before the prospect replies. New storage
   // key (v2) so the snappier 1s default replaces the old 2s value people had saved.
   const [pauseGrace, setPauseGrace] = useState(() => {
-    try { const v = Number(localStorage.getItem('wb_pause_grace3')); if (v >= 400 && v <= 5000) return v; } catch (e) {}
-    return 1500;
+    try { const v = Number(localStorage.getItem('wb_pause_grace3')); if (v >= 400 && v <= 8000) return v; } catch (e) {}
+    return 2500;
   });
   const [hintOpen, setHintOpen] = useState(false);
   const [hintMenu, setHintMenu] = useState(false);
@@ -472,7 +472,7 @@ function Trainer({ user }) {
         // and the listener heard a genuine phrase (≥2 words) — keeps speaker echo from
         // self-interrupting while still triggering on a quick "wait, stop".
         if (callActiveRef.current && callStateRef.current === 'speaking'
-            && (Date.now() - speakSince) > 800 && words >= 2) {
+            && (Date.now() - speakSince) > 1500 && words >= 3) {
           // Cut the AI off immediately, then hand what you've said so far into the
           // normal listening loop — it keeps listening and only replies once you
           // actually stop talking (instead of jumping in after the first few words).
@@ -1672,7 +1672,7 @@ function Trainer({ user }) {
             </div>
             <div style={S.settingLabel}>PAUSE BEFORE REPLY</div>
             <div style={S.diffMini}>
-              {[1000, 1500, 2000, 3000].map((ms) => (
+              {[1500, 2000, 2500, 3000, 4000, 5000].map((ms) => (
                 <button key={ms} onClick={() => setPauseGrace(ms)}
                   style={{ ...S.diffMiniBtn, borderColor: pauseGrace === ms ? '#D4A843' : '#2A3A4A', background: pauseGrace === ms ? '#D4A843' : 'transparent', color: pauseGrace === ms ? '#0F1419' : '#8899A6' }}>
                   {ms / 1000}s
