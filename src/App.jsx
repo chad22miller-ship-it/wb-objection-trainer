@@ -1287,17 +1287,7 @@ function Trainer({ user }) {
     hintLoadingRef.current = false;
   }, [mode]);
 
-  // Auto-pop a strategy hint the moment the rep is clearly off track (roleplay only).
-  useEffect(() => {
-    if (mode !== 'roleplay' || loading) return;
-    const repTurns = messages.filter((m) => m.role === 'user').length;
-    const offTrack = repTurns >= 3 && whyProgress <= 2;
-    if (offTrack && !offTrackHelpedRef.current && !hintOpen) {
-      offTrackHelpedRef.current = true;
-      getHint('strategy');
-    }
-    if (whyProgress > 2) offTrackHelpedRef.current = false;
-  }, [messages, whyProgress, mode, loading, hintOpen, getHint]);
+  // Hints are manual only — the rep taps 💡 Hint when they want one. No auto-pop.
 
   const insertSelection = useCallback(() => {
     const sel = (typeof window !== 'undefined' && window.getSelection) ? window.getSelection().toString().trim() : '';
@@ -2073,21 +2063,14 @@ function Trainer({ user }) {
               background: whyProgress * 10 >= 95 ? '#43A047' : whyProgress >= 5 ? '#D4A843' : '#3A5A7A',
             }} />
           </div>
-          {messages.filter((m) => m.role === 'user').length >= 3 && whyProgress <= 2 ? (
-            <div style={S.offTrackBox}>
-              <span style={S.offTrackLabel}>⚠️ Off track — you haven't gotten near their WHY.</span>
-              <button style={{ ...S.offTrackBtn, opacity: hintLoading ? 0.5 : 1 }} disabled={hintLoading} onClick={() => getHint('strategy')}>💡 What would Raja do?</button>
-            </div>
-          ) : (
-            <div style={S.whyBarHint}>
-              {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
-              {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
-              {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
-              {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
-              {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
-              {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
-            </div>
-          )}
+          <div style={S.whyBarHint}>
+            {whyProgress <= 2 && 'Ask about their life — who are they, what do they do?'}
+            {whyProgress > 2 && whyProgress <= 4 && 'Go deeper — what do they really want for their family?'}
+            {whyProgress > 4 && whyProgress <= 6 && "Getting warmer — what's it costing them to stay where they are?"}
+            {whyProgress > 6 && whyProgress < 8 && "Almost there — make them feel the gap. Who are they doing this for?"}
+            {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
+            {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
+          </div>
           <div style={{ ...S.drillInputRow, justifyContent: 'center', marginTop: 8 }}>
             <button style={S.callCircle} onClick={startCall} title="Resume live call">📞</button>
             <span style={{ fontSize: 12, color: '#8899A6', alignSelf: 'center' }}>Tap to talk to the prospect</span>
