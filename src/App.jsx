@@ -280,6 +280,11 @@ function Trainer({ user }) {
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
   const pauseGraceRef = useRef(1500); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
   const watchStopRef = useRef(false); // lets the user stop the Watch-Raja auto-play mid-run
+  const userToneRef = useRef({ label: null, hz: null, energy: null, wpm: null });
+  const toneAudioCtxRef = useRef(null);
+  const toneAnalyserRef = useRef(null);
+  const toneSamplesRef = useRef({ pitches: [], energies: [], startMs: 0, wordCount: 0 });
+  const aiToneRef = useRef('neutral');
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { callStateRef.current = callState; }, [callState]);
@@ -320,6 +325,8 @@ function Trainer({ user }) {
       if (timerRef.current) clearInterval(timerRef.current);
       if (micStreamRef.current) micStreamRef.current.getTracks().forEach((t) => t.stop());
       if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {});
+      toneAnalyserRef.current = null;
+      if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} toneAudioCtxRef.current = null; }
     };
   }, []);
 
@@ -382,8 +389,23 @@ function Trainer({ user }) {
   const makeUtterance = useCallback((text, onEnd) => {
     const u = new SpeechSynthesisUtterance(text);
     const v = pickVoice(); if (v) u.voice = v;
-    u.rate = calibRef.current.rate || 1.0;
-    u.pitch = calibRef.current.pitch || 1.0;
+    const base = { rate: calibRef.current.rate || 1.0, pitch: calibRef.current.pitch || 1.0 };
+    // Tone-based modifiers layered on top of calibration
+    const toneMap = {
+      warm:        { rate: 0.97, pitch: 1.03 },
+      gentle:      { rate: 0.92, pitch: 1.06 },
+      guarded:     { rate: 0.95, pitch: 0.97 },
+      tense:       { rate: 1.05, pitch: 0.93 },
+      flat:        { rate: 0.98, pitch: 0.96 },
+      excited:     { rate: 1.08, pitch: 1.10 },
+      firm:        { rate: 1.00, pitch: 0.95 },
+      curious:     { rate: 0.96, pitch: 1.04 },
+      encouraging: { rate: 1.02, pitch: 1.07 },
+      concerned:   { rate: 0.90, pitch: 0.95 },
+    };
+    const mod = toneMap[aiToneRef.current] || { rate: 1.0, pitch: 1.0 };
+    u.rate = Math.round(base.rate * mod.rate * 100) / 100;
+    u.pitch = Math.round(base.pitch * mod.pitch * 100) / 100;
     u.onend = onEnd;
     u.onerror = onEnd;
     return u;
@@ -451,6 +473,56 @@ function Trainer({ user }) {
   /* ---------- barge-in: listen while the AI is speaking ---------- */
   const stopBargeListen = useCallback(() => {
     if (bargeRecRef.current) { try { bargeRecRef.current.abort(); } catch (e) {} bargeRecRef.current = null; }
+  }, []);
+
+  const startToneAnalysis = useCallback(async () => {
+    try {
+      if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const ctx = new (window.AudioContext || window.webkitAudioContext)();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      toneAudioCtxRef.current = ctx;
+      toneAnalyserRef.current = analyser;
+      toneSamplesRef.current = { pitches: [], energies: [], startMs: Date.now(), wordCount: 0 };
+      const buf = new Float32Array(analyser.fftSize);
+      const sample = () => {
+        if (!toneAnalyserRef.current) return;
+        analyser.getFloatTimeDomainData(buf);
+        let rms = 0;
+        for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
+        rms = Math.sqrt(rms / buf.length);
+        if (rms > 0.01) {
+          toneSamplesRef.current.energies.push(rms);
+          const hz = autoCorrelate(buf, ctx.sampleRate);
+          if (hz > 0) toneSamplesRef.current.pitches.push(hz);
+        }
+        if (toneAnalyserRef.current) requestAnimationFrame(sample);
+      };
+      requestAnimationFrame(sample);
+    } catch (e) { /* mic access may already be held — skip tone analysis silently */ }
+  }, []);
+
+  const stopToneAnalysis = useCallback((wordCount = 0) => {
+    toneAnalyserRef.current = null;
+    if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} toneAudioCtxRef.current = null; }
+    const { pitches, energies, startMs } = toneSamplesRef.current;
+    if (!pitches.length && !energies.length) return;
+    const avgHz = pitches.length ? pitches.reduce((a, b) => a + b, 0) / pitches.length : 0;
+    const avgEnergy = energies.length ? energies.reduce((a, b) => a + b, 0) / energies.length : 0;
+    const durationSec = Math.max((Date.now() - startMs) / 1000, 0.5);
+    const wpm = wordCount ? Math.round((wordCount / durationSec) * 60) : null;
+    // Classify tone from pitch + energy + pace
+    let label = 'neutral';
+    if (avgEnergy > 0.12 && avgHz > 180) label = 'energetic';
+    else if (avgEnergy > 0.10 && wpm && wpm > 160) label = 'confident';
+    else if (avgHz > 200 && avgEnergy < 0.07) label = 'nervous';
+    else if (wpm && wpm > 180) label = 'rushed';
+    else if (avgEnergy < 0.05) label = 'hesitant';
+    else if (avgHz < 130 && avgEnergy < 0.08) label = 'flat';
+    userToneRef.current = { label, hz: Math.round(avgHz), energy: Math.round(avgEnergy * 1000) / 1000, wpm };
   }, []);
 
   const startBargeListen = useCallback((speakSince) => {
@@ -576,6 +648,7 @@ function Trainer({ user }) {
   // the prospect replies to the WHOLE thought, not just the first few words.
   startListeningRef.current = (seed = '') => {
     if (!callActiveRef.current) return;
+    startToneAnalysis();
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setCallState('error'); setCallError('No speech recognition. Open in Chrome/Edge.'); return; }
     if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} }
@@ -660,6 +733,7 @@ function Trainer({ user }) {
   // speaking over a newer turn (e.g. after a barge-in).
   handleTurnRef.current = async (text) => {
     if (!callActiveRef.current) return;
+    stopToneAnalysis(text.trim().split(/\s+/).length);
     const myTurn = (turnIdRef.current += 1);
     setCallState('thinking'); setLiveTranscript('');
     resetSpeechQueue();
@@ -876,9 +950,11 @@ function Trainer({ user }) {
   const stripProgressTags = useCallback((text) => {
     const whyMatch = text.match(/\[WHY_PROGRESS:(\d+)\]/);
     const drillMatch = text.match(/\[DRILL_PROGRESS:(\d+)\]/);
+    const toneMatch = text.match(/\[VOICE_TONE:(\w+)\]/);
     const whyScore = whyMatch ? parseInt(whyMatch[1], 10) : null;
     const drillScore = drillMatch ? parseInt(drillMatch[1], 10) : null;
-    const clean = text.replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS):\d+\]\s*/g, '').trim();
+    if (toneMatch) aiToneRef.current = toneMatch[1].toLowerCase();
+    const clean = text.replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS|VOICE_TONE):[^\]]+\]\s*/g, '').trim();
     return { clean, whyScore, drillScore };
   }, []);
 
@@ -932,7 +1008,11 @@ function Trainer({ user }) {
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
-    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs);
+    const tone = userToneRef.current?.label;
+    const toneCtx = tone && tone !== 'neutral'
+      ? `\n\n[USER VOICE TONE THIS TURN: ${tone}${userToneRef.current.wpm ? ` — ~${userToneRef.current.wpm} wpm` : ''} — adjust your response energy and pace to meet them where they are]`
+      : '';
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + toneCtx;
     const result = await callAPI(
       trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content })),
       sys
@@ -971,7 +1051,11 @@ function Trainer({ user }) {
     // brevity rule suppresses it and the fast Groq stream mangles it, so drill skips
     // both — see the isDrill branch below.
     const isDrill = modeRef.current === 'drill';
-    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + (isDrill ? '' : CALL_BREVITY);
+    const tone = userToneRef.current?.label;
+    const toneCtx = tone && tone !== 'neutral'
+      ? `\n\n[USER VOICE TONE THIS TURN: ${tone}${userToneRef.current.wpm ? ` — ~${userToneRef.current.wpm} wpm` : ''} — adjust your response energy and pace to meet them where they are]`
+      : '';
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + (isDrill ? '' : CALL_BREVITY) + toneCtx;
     const apiMsgs = trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content }));
 
     // Pull complete sentences out of the growing raw text and speak them. Progress
