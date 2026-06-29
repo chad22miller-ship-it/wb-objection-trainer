@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
 import { supabase } from './lib/supabase';
-import { store } from './lib/store';
+import { store, migrateLocalSessionsToSupabase } from './lib/store';
 import { callAPI, callAPIStream } from './lib/api';
 import {
   cleanForSpeech, chunkText, clamp, median, autoCorrelate,
@@ -125,6 +125,7 @@ export default function App() {
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY') setRecovery(true);
       setUser(session?.user || null);
+      if (event === 'SIGNED_IN') migrateLocalSessionsToSupabase();
     });
     return () => listener?.subscription?.unsubscribe();
   }, []);
@@ -786,7 +787,7 @@ function Trainer({ user }) {
       sys += '\n\nSEEDED STORY — CRITICAL: You are the SAME client from the call below, where a master rep named Raja was selling to YOU. Become that exact client — same name if one was given, same job/money/family details, and the SAME deep emotional WHY you revealed. A trainee rep is now going to run the call and try to uncover everything Raja uncovered. Stay 100% consistent with the story below, but make them EARN it like a real person would: reveal your situation and your WHY only as they ask good, caring, layered questions. Do not dump it all at once. If they get pushy, pitch early, or skip discovery, get guarded and pull back.\n\nPRIOR CALL (you are the CLIENT in it):\n' + seedRef.current;
     } else {
       const booking = BOOKING_SCENARIOS[bookingRef.current] || BOOKING_SCENARIOS[0];
-      sys += '\n\n' + booking.context;
+      sys += '\n\nBOOKING CONTEXT — YOUR OPENING ATTITUDE (this OVERRIDES the difficulty level above for how warm or guarded you are at the very START of the call — apply difficulty naturally as the call progresses, but BEGIN with exactly the warmth/skepticism described here):\n' + booking.context;
       sys += '\n\nYOUR SPECIFIC PROFILE:\n' + PROSPECT_PROFILES[pIdx].profile;
     }
     return sys;
