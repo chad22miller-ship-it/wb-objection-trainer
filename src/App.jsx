@@ -121,6 +121,7 @@ export default function App() {
     supabase.auth.getSession().then(({ data }) => {
       setUser(data.session?.user || null);
       setAuthLoading(false);
+      if (data.session?.user) migrateLocalSessionsToSupabase();
     });
     const { data: listener } = supabase.auth.onAuthStateChange((event, session) => {
       if (event === 'PASSWORD_RECOVERY') setRecovery(true);
