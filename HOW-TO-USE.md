@@ -4,16 +4,6 @@ Your personal sales practice partner. Run real practice calls, get coached like 
 
 **Your app:** https://wb-objection-trainer.vercel.app
 
-> 💡 **Use Chrome or Edge on a computer, or Chrome on Android, for full voice.** On iPhone/iPad, voice (talking out loud) doesn't work — you can still train by typing your replies.
-
----
-
-## Getting started (60 seconds)
-
-1. Open the link above.
-2. **Sign up** with your email and a password (first time), or **Sign in** if you already have an account.
-3. You'll land on the home screen. That's it — start practicing.
-
 ---
 
 ## The home screen — set up your call
@@ -72,15 +62,6 @@ See your past sessions, scores, and how you're trending over time.
 ### ⚙️ Settings (during a call)
 - **Voice calibration:** read one line out loud once, and the AI matches its speaking pace and pitch to feel natural to you.
 - **Pick a voice** and adjust the silence window (how long it waits before you've "finished talking").
-
----
-
-## Voice tips
-
-- **Allow microphone access** when the browser asks — voice won't work without it.
-- Use **headphones** if you can — it stops the AI from hearing itself through your speakers and interrupting.
-- The AI **listens to your tone** — talk with energy and it matches you; talk soft and guarded and it softens too.
-- On a phone, keep the screen on during a live call (a screen lock can cut the mic).
 
 ---
 

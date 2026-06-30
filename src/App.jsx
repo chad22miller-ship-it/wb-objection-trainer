@@ -1481,8 +1481,6 @@ function Trainer({ user }) {
           <button style={S.redempterX} onClick={() => setHowToOpen(false)}>✕</button>
         </div>
         <div style={S.howToBody}>
-          <div style={S.howToCallout}>💡 Use <b>Chrome or Edge</b> on a computer, or <b>Chrome on Android</b>, for full voice. On iPhone/iPad, talking out loud isn&apos;t supported — you can still train by typing.</div>
-
           <div style={S.howToH}>1. Set up your call</div>
           <p style={S.howToP}>At the top, pick a <b>difficulty</b> (1 Believer = easy → 4 Leader = brutal) and <b>how the call was booked</b> — this sets how warm or guarded the prospect starts.</p>
 
@@ -1502,9 +1500,6 @@ function Trainer({ user }) {
 
           <div style={S.howToH}>4. The other tools</div>
           <p style={S.howToP}><b>🛟 Redempter</b> — paste a real objection or a whole call transcript and Raja shows you how he&apos;d redeem it. <b>📊 History</b> — your past sessions, scores, and trends.</p>
-
-          <div style={S.howToH}>Voice tips</div>
-          <p style={S.howToP}>Allow microphone access when asked. Use headphones so the AI doesn&apos;t hear itself. It listens to your tone — bring energy and it matches you. On a phone, keep the screen on during a live call.</p>
         </div>
         <div style={S.redempterActions}>
           <button style={S.redempterGo} onClick={() => setHowToOpen(false)}>Got it — let&apos;s train</button>
