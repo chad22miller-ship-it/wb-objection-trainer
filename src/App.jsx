@@ -284,7 +284,9 @@ function Trainer({ user }) {
   const toneAudioCtxRef = useRef(null);
   const toneAnalyserRef = useRef(null);
   const toneSamplesRef = useRef({ pitches: [], energies: [], startMs: 0, wordCount: 0 });
+  const toneStartingRef = useRef(false); // true between getUserMedia request and stream ready
   const aiToneRef = useRef('neutral');
+  const lastTurnRef = useRef({ text: '', at: 0 }); // de-dupe identical turns fired in quick succession
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
   useEffect(() => { callStateRef.current = callState; }, [callState]);
@@ -476,8 +478,10 @@ function Trainer({ user }) {
   }, []);
 
   const startToneAnalysis = useCallback(async () => {
+    // Already running (or mid-startup)? Don't open a second mic stream.
+    if (toneAudioCtxRef.current || toneStartingRef.current) return;
+    toneStartingRef.current = true;
     try {
-      if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} }
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const ctx = new (window.AudioContext || window.webkitAudioContext)();
       const source = ctx.createMediaStreamSource(stream);
@@ -503,9 +507,11 @@ function Trainer({ user }) {
       };
       requestAnimationFrame(sample);
     } catch (e) { /* mic access may already be held — skip tone analysis silently */ }
+    finally { toneStartingRef.current = false; }
   }, []);
 
   const stopToneAnalysis = useCallback((wordCount = 0) => {
+    toneStartingRef.current = false;
     toneAnalyserRef.current = null;
     if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} toneAudioCtxRef.current = null; }
     const { pitches, energies, startMs } = toneSamplesRef.current;
@@ -648,7 +654,10 @@ function Trainer({ user }) {
   // the prospect replies to the WHOLE thought, not just the first few words.
   startListeningRef.current = (seed = '') => {
     if (!callActiveRef.current) return;
-    startToneAnalysis();
+    // Only start tone analysis on a FRESH turn (no seed). Reseed restarts happen
+    // repeatedly mid-pause — re-opening the mic each time churned audio streams and
+    // destabilized the recognizer, which re-fired onend and duplicated the turn.
+    if (!seed) startToneAnalysis();
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setCallState('error'); setCallError('No speech recognition. Open in Chrome/Edge.'); return; }
     if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} }
@@ -733,7 +742,15 @@ function Trainer({ user }) {
   // speaking over a newer turn (e.g. after a barge-in).
   handleTurnRef.current = async (text) => {
     if (!callActiveRef.current) return;
-    stopToneAnalysis(text.trim().split(/\s+/).length);
+    // De-dupe: if the exact same text just fired within 2.5s, it's a stray restart
+    // re-sending the same words — drop it so the prospect doesn't hear it twice.
+    const t = (text || '').trim();
+    if (t && t === lastTurnRef.current.text && (Date.now() - lastTurnRef.current.at) < 2500) {
+      if (startListeningRef.current) startListeningRef.current();
+      return;
+    }
+    lastTurnRef.current = { text: t, at: Date.now() };
+    stopToneAnalysis(t.split(/\s+/).length);
     const myTurn = (turnIdRef.current += 1);
     setCallState('thinking'); setLiveTranscript('');
     resetSpeechQueue();
