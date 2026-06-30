@@ -26,6 +26,14 @@ CREATE POLICY "Users see own sessions" ON sessions
 CREATE POLICY "Users see own settings" ON settings
   FOR ALL USING (auth.uid() = user_id);
 
+-- Table-level privileges for logged-in users. RLS decides WHICH ROWS a user can
+-- touch; these GRANTs decide whether the "authenticated" role may touch the table
+-- at all. WITHOUT THESE, every logged-in request fails with
+--   42501 "permission denied for table ..."
+-- and the app silently falls back to localStorage (so the admin sees 0 sessions).
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.sessions TO authenticated;
+GRANT SELECT, INSERT, UPDATE, DELETE ON public.settings TO authenticated;
+
 -- Indexes for fast lookups
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_settings_user ON settings(user_id);

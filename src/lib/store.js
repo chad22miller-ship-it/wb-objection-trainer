@@ -9,7 +9,22 @@ async function getUserId() {
   // getSession() returns the cached local token — no network round-trip.
   // getUser() makes a server request every time, which can time out and silently drop the save to localStorage.
   const { data } = await supabase.auth.getSession();
-  return data?.session?.user?.id || null;
+  const session = data?.session;
+  if (!session) return null;
+  // CRITICAL: the cached token expires (~1h). If we write with an expired token the
+  // DB rejects it ("JWT expired") and the save silently falls back to localStorage —
+  // which is why sessions stopped showing up server-side. If the token is expired or
+  // within 2 min of it, force a refresh before using it for a write.
+  const expMs = (session.expires_at || 0) * 1000;
+  if (expMs && expMs - Date.now() < 120000) {
+    try {
+      const { data: refreshed } = await supabase.auth.refreshSession();
+      return refreshed?.session?.user?.id || session.user?.id || null;
+    } catch (e) {
+      return session.user?.id || null;
+    }
+  }
+  return session.user?.id || null;
 }
 
 export const store = {
@@ -80,8 +95,9 @@ export const store = {
 // admin can see them. Runs silently — failures are ignored.
 export async function migrateLocalSessionsToSupabase() {
   if (!supabase) return;
-  const { data } = await supabase.auth.getSession();
-  const userId = data?.session?.user?.id;
+  // Use the same fresh-token guard as writes — a stale token here would 401 the
+  // whole migration and leave the sessions stranded in localStorage.
+  const userId = await getUserId();
   if (!userId) return;
 
   const keys = [];
