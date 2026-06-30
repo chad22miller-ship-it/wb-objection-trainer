@@ -235,6 +235,7 @@ function Trainer({ user }) {
 
   // Redempter — paste a real objection or transcript, get Raja-style coaching
   const [redempterOpen, setRedempterOpen] = useState(false);
+  const [howToOpen, setHowToOpen] = useState(false);
   const [redempterInput, setRedempterInput] = useState('');
   const [redempterResult, setRedempterResult] = useState('');
   const [redempterLoading, setRedempterLoading] = useState(false);
@@ -1468,6 +1469,50 @@ function Trainer({ user }) {
     runRedempter(t);
   };
 
+  // How-to-use guide modal — opened from the home screen
+  const howToModalEl = howToOpen && (
+    <div style={S.redempterOverlay} onClick={() => setHowToOpen(false)}>
+      <div style={S.redempterModal} onClick={(e) => e.stopPropagation()}>
+        <div style={S.redempterHeader}>
+          <div>
+            <div style={S.redempterTitle}>📖 HOW TO USE</div>
+            <div style={S.redempterSub}>Everything you need to start training.</div>
+          </div>
+          <button style={S.redempterX} onClick={() => setHowToOpen(false)}>✕</button>
+        </div>
+        <div style={S.howToBody}>
+          <div style={S.howToCallout}>💡 Use <b>Chrome or Edge</b> on a computer, or <b>Chrome on Android</b>, for full voice. On iPhone/iPad, talking out loud isn&apos;t supported — you can still train by typing.</div>
+
+          <div style={S.howToH}>1. Set up your call</div>
+          <p style={S.howToP}>At the top, pick a <b>difficulty</b> (1 Believer = easy → 4 Leader = brutal) and <b>how the call was booked</b> — this sets how warm or guarded the prospect starts.</p>
+
+          <div style={S.howToH}>2. Pick how you want to train</div>
+          <p style={S.howToP}><b>🎭 The Prospect</b> — a full practice call. You run discovery, uncover their WHY, handle objections, and close. Watch the WHY meter climb as you earn it.</p>
+          <p style={S.howToP}><b>🧑‍🏫 Learn from Raja</b> — the script flips: a master rep runs the call and you play the client. Feel elite selling from the receiving end, then switch roles and try it yourself.</p>
+          <p style={S.howToP}><b>💥 The Gauntlet</b> — rapid-fire objection drills, scored against your frameworks.</p>
+
+          <div style={S.howToH}>3. During a call</div>
+          <p style={S.howToP}><b>📞 Tap to go hands-free</b> — talk and the prospect talks back. <b>💡 Hint</b> tells you the exact move and when to use the Pullback, Pain Bridge, Must Conversion, or Bridge. <b>End &amp; Debrief</b> scores your call.</p>
+          <ul style={S.howToUl}>
+            <li><b>Pullback</b> — they&apos;re pushing back / feeling pressure → release it.</li>
+            <li><b>Pain Bridge</b> — committed but stalling → make them feel the cost of staying put.</li>
+            <li><b>Must Conversion</b> — interested but not committed.</li>
+            <li><b>Bridge (New Art of Living)</b> — only once the WHY is real and felt.</li>
+          </ul>
+
+          <div style={S.howToH}>4. The other tools</div>
+          <p style={S.howToP}><b>🛟 Redempter</b> — paste a real objection or a whole call transcript and Raja shows you how he&apos;d redeem it. <b>📊 History</b> — your past sessions, scores, and trends.</p>
+
+          <div style={S.howToH}>Voice tips</div>
+          <p style={S.howToP}>Allow microphone access when asked. Use headphones so the AI doesn&apos;t hear itself. It listens to your tone — bring energy and it matches you. On a phone, keep the screen on during a live call.</p>
+        </div>
+        <div style={S.redempterActions}>
+          <button style={S.redempterGo} onClick={() => setHowToOpen(false)}>Got it — let&apos;s train</button>
+        </div>
+      </div>
+    </div>
+  );
+
   // Shared Redempter modal — rendered from both the home screen and a live session
   const redempterModalEl = redempterOpen && (
     <div style={S.redempterOverlay} onClick={() => !redempterLoading && setRedempterOpen(false)}>
@@ -1589,8 +1634,10 @@ function Trainer({ user }) {
 
           <button style={S.redempterLink} onClick={() => setRedempterOpen(true)}>🛟 Redempter — fix a real objection or call</button>
           <button style={S.historyLink} onClick={openHistory}>📊 History &amp; Patterns</button>
+          <button style={S.howToLink} onClick={() => setHowToOpen(true)}>📖 How to use this app</button>
         </div>
         {redempterModalEl}
+        {howToModalEl}
       </div>
     );
   }
@@ -2247,6 +2294,12 @@ const S = {
   cardDesc: { fontSize: 13, lineHeight: 1.6, color: '#8899A6', marginBottom: 18 },
   cardTag: { fontSize: 10, letterSpacing: '2px', color: '#D4A843', fontWeight: 700, borderTop: '1px solid #2A3A4A', paddingTop: 12 },
   historyLink: { marginTop: 32, background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
+  howToLink: { marginTop: 12, background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
+  howToBody: { overflowY: 'auto', flex: 1, paddingRight: 4 },
+  howToCallout: { fontSize: 13, lineHeight: 1.6, color: '#E8D9B0', background: '#2A2418', border: '1px solid #D4A843', borderRadius: 8, padding: '10px 12px', marginBottom: 16 },
+  howToH: { fontSize: 13, fontWeight: 800, letterSpacing: '1px', color: '#D4A843', marginTop: 16, marginBottom: 6 },
+  howToP: { fontSize: 13, lineHeight: 1.6, color: '#C8C8C8', margin: '0 0 8px 0' },
+  howToUl: { fontSize: 13, lineHeight: 1.7, color: '#C8C8C8', margin: '0 0 8px 0', paddingLeft: 18 },
 
   header: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '10px 14px', borderBottom: '1px solid #1A2332', background: '#0F1419', position: 'sticky', top: 0, zIndex: 20 },
   headerCenter: { display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'center' },
