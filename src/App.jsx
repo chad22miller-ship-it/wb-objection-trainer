@@ -15,6 +15,9 @@ import {
 import Auth from './components/Auth';
 import Admin from './components/Admin';
 
+const IS_IOS = typeof navigator !== 'undefined' && /iPad|iPhone|iPod/.test(navigator.userAgent || '');
+const SPEECH_REC_SUPPORTED = typeof window !== 'undefined' && !!(window.SpeechRecognition || window.webkitSpeechRecognition);
+
 /* ============================== MAIN APP ============================== */
 
 // Live call mode: keep replies short and spoken-sounding, and let the prospect
@@ -187,6 +190,13 @@ function Trainer({ user }) {
   const [callError, setCallError] = useState('');
 
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [isMobile, setIsMobile] = useState(typeof window !== 'undefined' && window.innerWidth <= 600);
+  const [voiceWarnDismissed, setVoiceWarnDismissed] = useState(false);
+  useEffect(() => {
+    const onResize = () => setIsMobile(window.innerWidth <= 600);
+    window.addEventListener('resize', onResize);
+    return () => window.removeEventListener('resize', onResize);
+  }, []);
   // How long the live call waits after you stop talking before the prospect replies (ms).
   // Silence window after you stop talking before the prospect replies. New storage
   // key (v2) so the snappier 1s default replaces the old 2s value people had saved.
@@ -706,6 +716,9 @@ function Trainer({ user }) {
         setCallError('Speech recognition lost network. Check your connection and try again.');
       } else if (ev.error === 'no-speech') {
         // no-speech is not fatal — just restart
+      } else if (ev.error === 'audio-capture') {
+        callActiveRef.current = false; setCallState('error');
+        setCallError('Lost the microphone. Another app may be using it. Close it and try again.');
       }
     };
     r.onend = () => {
@@ -790,12 +803,14 @@ function Trainer({ user }) {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setCallMode(true); setCallState('error'); setCallError('Live voice needs Chrome or Edge.'); return; }
     stopSpeaking(); setHintMenu(false); setSettingsOpen(false);
+    // iOS unlock: speechSynthesis must be kicked off inside a user gesture once.
+    try { if (synthRef.current) { const u = new SpeechSynthesisUtterance(''); u.volume = 0; synthRef.current.speak(u); } } catch (e) {}
     setCallMode(true); setCallState('connecting');
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       stream.getTracks().forEach((t) => t.stop());
     } catch (e) {
-      setCallState('error'); setCallError("Couldn't get mic access. Allow microphone in your browser settings."); return;
+      setCallState('error'); setCallError("Couldn't get mic access. Tap the address bar's lock/⋮ icon → Site settings → Microphone → Allow, then try again."); return;
     }
     callActiveRef.current = true;
     setCallState('listening'); setLiveTranscript('');
@@ -1516,7 +1531,7 @@ function Trainer({ user }) {
             </div>
           )}
           <div style={S.logoMark}>WB</div>
-          <h1 style={S.title}>OBJECTION TRAINING</h1>
+          <h1 style={{ ...S.title, ...(isMobile ? { fontSize: 22, letterSpacing: '2px' } : {}) }}>OBJECTION TRAINING</h1>
           <p style={S.subtitle}>Pick your difficulty. Pick your drill.</p>
 
           <div style={S.diffSelector}>
@@ -1540,20 +1555,31 @@ function Trainer({ user }) {
             ))}
           </div>
 
-          <div style={S.cardRow}>
-            <button style={S.card} onClick={() => startSession('roleplay', difficulty)}>
+          {(IS_IOS || !SPEECH_REC_SUPPORTED) && !voiceWarnDismissed && (
+            <div style={S.voiceWarn}>
+              <span style={S.voiceWarnText}>
+                {IS_IOS
+                  ? "📱 Heads up — voice (talking out loud) doesn't work on iPhone/iPad browsers. You can still train by typing your replies. For full voice, use Chrome on a computer or Android."
+                  : "⚠️ This browser doesn't support voice. Use Chrome or Edge for talking out loud, or train by typing."}
+              </span>
+              <button style={S.voiceWarnX} onClick={() => setVoiceWarnDismissed(true)}>✕</button>
+            </div>
+          )}
+
+          <div style={{ ...S.cardRow, ...(isMobile ? { flexDirection: 'column', alignItems: 'center', width: '100%' } : {}) }}>
+            <button style={{ ...S.card, ...(isMobile ? { width: '100%', maxWidth: 420 } : {}) }} onClick={() => startSession('roleplay', difficulty)}>
               <div style={S.cardIcon}>🎭</div>
               <div style={S.cardTitle}>THE PROSPECT</div>
               <div style={S.cardDesc}>Full voice roleplay. A real prospect talks, you talk back. Run PPF discovery, bridge to NAOL, handle whatever they throw.</div>
               <div style={S.cardTag}>CONVERSATION MUSCLE</div>
             </button>
-            <button style={S.card} onClick={() => startSession('raja', difficulty)}>
+            <button style={{ ...S.card, ...(isMobile ? { width: '100%', maxWidth: 420 } : {}) }} onClick={() => startSession('raja', difficulty)}>
               <div style={S.cardIcon}>🧑‍🏫</div>
               <div style={S.cardTitle}>LEARN FROM RAJA</div>
               <div style={S.cardDesc}>Flip the script. Raja, a master rep, runs the call and YOU play the client. Feel elite discovery, the WHY, and objection handling done right.</div>
               <div style={S.cardTag}>WATCH THE MASTER</div>
             </button>
-            <button style={S.card} onClick={() => startSession('drill', difficulty)}>
+            <button style={{ ...S.card, ...(isMobile ? { width: '100%', maxWidth: 420 } : {}) }} onClick={() => startSession('drill', difficulty)}>
               <div style={S.cardIcon}>💥</div>
               <div style={S.cardTitle}>THE GAUNTLET</div>
               <div style={S.cardDesc}>Rapid-fire with voice. Scenario drops, objection hits, you respond out loud, you get scored against your frameworks.</div>
@@ -1753,7 +1779,7 @@ function Trainer({ user }) {
         )}
 
         {settingsOpen && (
-          <div style={S.settingsPanel}>
+          <div style={{ ...S.settingsPanel, ...(isMobile ? { width: 'calc(100vw - 24px)', right: 12, left: 12 } : {}) }}>
             <div style={S.settingLabel}>DIFFICULTY</div>
             <div style={S.diffMini}>
               {DIFFICULTY_META.map((dm) => (
@@ -2191,7 +2217,7 @@ function Trainer({ user }) {
 /* ============================== STYLES ============================== */
 
 const S = {
-  container: { height: '100vh', background: '#0F1419', color: '#E8E6E1', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display: 'flex', flexDirection: 'column', overflow: 'hidden' },
+  container: { height: '100dvh', background: '#0F1419', color: '#E8E6E1', fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif", display: 'flex', flexDirection: 'column', overflow: 'hidden' },
   landing: { display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', minHeight: '100vh', padding: '24px' },
   logoMark: { fontSize: 14, fontWeight: 700, letterSpacing: '3px', color: '#D4A843', border: '1px solid #D4A843', padding: '6px 14px', marginBottom: 28 },
   title: { fontSize: 28, fontWeight: 800, letterSpacing: '4px', margin: '0 0 8px 0' },
@@ -2209,6 +2235,10 @@ const S = {
   bookingHint: { fontWeight: 400, textTransform: 'none', letterSpacing: 0, color: '#5A6A7A' },
   bookingSelector: { display: 'flex', gap: 8, marginBottom: 32, flexWrap: 'wrap', justifyContent: 'center' },
   bookingBtn: { border: '1px solid', borderRadius: 16, padding: '6px 14px', cursor: 'pointer', fontFamily: 'inherit', fontSize: 11, fontWeight: 600, letterSpacing: '.5px', transition: 'all .15s' },
+
+  voiceWarn: { display: 'flex', alignItems: 'flex-start', gap: 10, background: '#2A2418', border: '1px solid #D4A843', borderRadius: 8, padding: '12px 14px', marginBottom: 20, maxWidth: 600, width: '100%' },
+  voiceWarnText: { fontSize: 13, lineHeight: 1.5, color: '#E8D9B0', flex: 1 },
+  voiceWarnX: { background: 'none', border: 'none', color: '#8899A6', fontSize: 16, cursor: 'pointer', padding: 0, lineHeight: 1, flexShrink: 0 },
 
   cardRow: { display: 'flex', gap: 20, flexWrap: 'wrap', justifyContent: 'center', maxWidth: 1000 },
   card: { background: '#1A2332', border: '1px solid #2A3A4A', borderRadius: 8, padding: '30px 24px', width: 310, cursor: 'pointer', textAlign: 'left', color: '#E8E6E1', transition: 'border-color .2s, transform .2s', fontFamily: 'inherit' },
