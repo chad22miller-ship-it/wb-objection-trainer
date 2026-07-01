@@ -831,24 +831,27 @@ function Trainer({ user }) {
           // rather than flipping partway through as the tail sentences play.
           speakingToneRef.current = aiToneRef.current;
           setCallState('speaking');
-          startBargeListen(speakSince);
+          // No barge-in on mobile: phone speakers have poor echo cancellation, so a
+          // recognizer running during playback just hears the AI itself and "interrupts"
+          // with the AI's own words. On mobile the mic only opens after the AI finishes.
+          if (!isMobile) startBargeListen(speakSince);
         }
         enqueueSpeak(s);
       },
     });
     if (!callActiveRef.current || turnIdRef.current !== myTurn) return;
-    if (reply == null) {
-      stopBargeListen();
-      setCallState('listening');
-      if (startListeningRef.current) startListeningRef.current();
-      return;
-    }
-    finishSpeechStream(() => {
+    // Open the mic for the user's turn. On mobile, wait a beat after the AI stops so the
+    // speaker's audio tail clears before the recognizer starts (no barge-in there to
+    // catch it), otherwise the last words play into the mic and come back as a "turn".
+    const openMic = () => {
       if (!callActiveRef.current || turnIdRef.current !== myTurn) return;
       stopBargeListen();
       setCallState('listening');
-      if (startListeningRef.current) startListeningRef.current();
-    });
+      const go = () => { if (callActiveRef.current && turnIdRef.current === myTurn && startListeningRef.current) startListeningRef.current(); };
+      if (isMobile) setTimeout(go, 500); else go();
+    };
+    if (reply == null) { openMic(); return; }
+    finishSpeechStream(openMic);
   };
 
   const startCall = useCallback(async () => {
