@@ -668,7 +668,10 @@ function Trainer({ user }) {
     // Only start tone analysis on a FRESH turn (no seed). Reseed restarts happen
     // repeatedly mid-pause — re-opening the mic each time churned audio streams and
     // destabilized the recognizer, which re-fired onend and duplicated the turn.
-    if (!seed) startToneAnalysis();
+    // On PHONES the mic can only be used by ONE consumer at a time — grabbing it here
+    // for tone analysis starves the speech recognizer (audio-capture error / no audio),
+    // so tone matching is desktop-only. Voice recognition wins the mic on mobile.
+    if (!seed && !isMobile) startToneAnalysis();
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
     if (!SR) { setCallState('error'); setCallError('No speech recognition. Open in Chrome/Edge.'); return; }
     if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} }
