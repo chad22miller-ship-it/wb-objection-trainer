@@ -782,6 +782,23 @@ function Trainer({ user }) {
     if (!callActiveRef.current) return;
     const t = (text || '').trim();
     const wordCount = t ? t.split(/\s+/).filter(Boolean).length : 0;
+    // Echo guard: on laptop speakers (no headphones) the mic hears the PROSPECT's own
+    // voice and captures it as a "user" turn — the prospect then answers itself. If the
+    // captured text is largely what the AI just spoke (lastSpokenRef holds its recent
+    // words), drop it and keep listening instead of sending it as the user's reply.
+    const normEcho = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+    const spoken = normEcho(lastSpokenRef.current);
+    const heard = normEcho(t);
+    if (heard && spoken && wordCount >= 3) {
+      const hw = heard.split(' ').filter(Boolean);
+      const sw = new Set(spoken.split(' '));
+      const overlap = hw.length ? hw.filter((w) => sw.has(w)).length / hw.length : 0;
+      if (spoken.includes(heard) || overlap > 0.6) {
+        stopToneAnalysis(0); // close the mic stream this dropped turn opened
+        if (startListeningRef.current) startListeningRef.current();
+        return;
+      }
+    }
     // De-dupe stray recognizer restarts that re-send a whole buffered sentence. Only
     // guard MULTI-word turns (≥3 words) — a short "yes"/"okay" said twice in a row is a
     // legitimate reply, not a stray restart, and must not be swallowed.
