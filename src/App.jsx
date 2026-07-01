@@ -277,6 +277,7 @@ function Trainer({ user }) {
   const sqDoneRef = useRef(false);     // has the model stream finished
   const sqDrainRef = useRef(null);     // callback to fire when queue empties AND stream done
   const lastSpokenRef = useRef('');    // what the AI is currently saying — used to ignore mic echo
+  const lastAiSaidRef = useRef('');    // the AI's last reply, kept for echo detection (NOT cleared on reset/barge)
   const bargeRecRef = useRef(null);    // recognizer that listens while the AI speaks (barge-in)
   const callStateRef = useRef('idle'); // mirror of callState for use inside async callbacks
   const turnIdRef = useRef(0);         // bumps each turn so a stale stream can't speak over a new one
@@ -476,6 +477,9 @@ function Trainer({ user }) {
     // Remember the AI's words so the barge-in recognizer can tell its own echo
     // (heard back through the speakers) from the user actually interrupting.
     lastSpokenRef.current = (lastSpokenRef.current + ' ' + t).slice(-600);
+    // Same words in a ref that ISN'T wiped by resetSpeechQueue/barge — the post-speech
+    // echo guard in handleTurn needs it after the queue has been reset.
+    lastAiSaidRef.current = (lastAiSaidRef.current + ' ' + t).slice(-600);
     sqItemsRef.current.push(t);
     if (!sqSpeakingRef.current) pumpSpeech();
   }, [voiceEnabled, pumpSpeech]);
@@ -787,7 +791,7 @@ function Trainer({ user }) {
     // captured text is largely what the AI just spoke (lastSpokenRef holds its recent
     // words), drop it and keep listening instead of sending it as the user's reply.
     const normEcho = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
-    const spoken = normEcho(lastSpokenRef.current);
+    const spoken = normEcho(lastAiSaidRef.current);
     const heard = normEcho(t);
     if (heard && spoken && wordCount >= 3) {
       const hw = heard.split(' ').filter(Boolean);
@@ -821,6 +825,7 @@ function Trainer({ user }) {
         if (!started) {
           started = true;
           speakSince = Date.now();
+          lastAiSaidRef.current = ''; // fresh reply — echo guard should match THIS reply only
           // Freeze the tone for this whole reply. The new tag isn't parsed until the
           // stream ends, so this holds the prior tone consistently across every sentence
           // rather than flipping partway through as the tail sentences play.
