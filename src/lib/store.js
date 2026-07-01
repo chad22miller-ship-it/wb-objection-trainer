@@ -15,8 +15,11 @@ async function getUserId() {
   // DB rejects it ("JWT expired") and the save silently falls back to localStorage —
   // which is why sessions stopped showing up server-side. If the token is expired or
   // within 2 min of it, force a refresh before using it for a write.
+  // Refresh when the token is expired, within 2 min of expiring, OR when the session
+  // is missing an expiry entirely (a session with no expires_at can't be trusted, so
+  // force a refresh rather than writing with a possibly-stale token).
   const expMs = (session.expires_at || 0) * 1000;
-  if (expMs && expMs - Date.now() < 120000) {
+  if (!expMs || expMs - Date.now() < 120000) {
     try {
       const { data: refreshed } = await supabase.auth.refreshSession();
       return refreshed?.session?.user?.id || session.user?.id || null;

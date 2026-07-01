@@ -286,17 +286,18 @@ function Trainer({ user }) {
   const profileIdxRef = useRef(0);
   const seedRef = useRef(null); // prior-call transcript when replaying as the rep
   const seedProfileRef = useRef(null); // prospect's full hidden profile (PPF) carried into a switched Raja call
-  const offTrackHelpedRef = useRef(false); // auto-hint fired once per off-track streak
   const debriefRunningRef = useRef(false); // re-entry guard so a debrief can't double-fire
   const whyEstablishedRef = useRef(false); // Raja: once the why is in, push the call forward (phase nudge)
   const pauseGraceRef = useRef(1500); // live-call silence window (ms) before auto-send; mirrors pauseGrace state
   const watchStopRef = useRef(false); // lets the user stop the Watch-Raja auto-play mid-run
   const userToneRef = useRef({ label: null, hz: null, energy: null, wpm: null });
   const toneAudioCtxRef = useRef(null);
+  const toneStreamRef = useRef(null); // the mic MediaStream — tracks must be stopped, not just ctx.close()
   const toneAnalyserRef = useRef(null);
-  const toneSamplesRef = useRef({ pitches: [], energies: [], startMs: 0, wordCount: 0 });
+  const toneSamplesRef = useRef({ pitches: [], energies: [], startMs: 0, firstVoiceMs: 0, lastVoiceMs: 0 });
   const toneStartingRef = useRef(false); // true between getUserMedia request and stream ready
-  const aiToneRef = useRef('neutral');
+  const aiToneRef = useRef('neutral');      // latest tone parsed from the model's reply tag
+  const speakingToneRef = useRef('neutral'); // tone FROZEN for the reply currently being spoken
   const lastTurnRef = useRef({ text: '', at: 0 }); // de-dupe identical turns fired in quick succession
 
   useEffect(() => { modeRef.current = mode; }, [mode]);
@@ -340,6 +341,7 @@ function Trainer({ user }) {
       if (audioCtxRef.current) audioCtxRef.current.close().catch(() => {});
       toneAnalyserRef.current = null;
       if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} toneAudioCtxRef.current = null; }
+      if (toneStreamRef.current) { try { toneStreamRef.current.getTracks().forEach((t) => t.stop()); } catch (e) {} toneStreamRef.current = null; }
     };
   }, []);
 
@@ -416,7 +418,10 @@ function Trainer({ user }) {
       encouraging: { rate: 1.02, pitch: 1.07 },
       concerned:   { rate: 0.90, pitch: 0.95 },
     };
-    const mod = toneMap[aiToneRef.current] || { rate: 1.0, pitch: 1.0 };
+    // Use the tone frozen for this whole reply — not aiToneRef, which can flip to the
+    // NEXT reply's tone while the tail sentences of this one are still queued (TTS lags
+    // streaming), causing an audible pitch shift mid-reply.
+    const mod = toneMap[speakingToneRef.current] || { rate: 1.0, pitch: 1.0 };
     u.rate = Math.round(base.rate * mod.rate * 100) / 100;
     u.pitch = Math.round(base.pitch * mod.pitch * 100) / 100;
     u.onend = onEnd;
@@ -427,6 +432,9 @@ function Trainer({ user }) {
   const speak = useCallback((text, onDone) => {
     if (!voiceEnabled || !synthRef.current) { if (onDone) onDone(); return; }
     synthRef.current.cancel();
+    // Text mode: tone tag was already parsed (finalizeReply) before speak(), so aiToneRef
+    // is this reply's tone — freeze it for the whole utterance.
+    speakingToneRef.current = aiToneRef.current;
     const chunks = chunkText(cleanForSpeech(text));
     setIsSpeaking(true);
     let i = 0;
@@ -500,19 +508,25 @@ function Trainer({ user }) {
       analyser.fftSize = 2048;
       source.connect(analyser);
       toneAudioCtxRef.current = ctx;
+      toneStreamRef.current = stream;
       toneAnalyserRef.current = analyser;
-      toneSamplesRef.current = { pitches: [], energies: [], startMs: Date.now(), wordCount: 0 };
+      toneSamplesRef.current = { pitches: [], energies: [], startMs: Date.now(), firstVoiceMs: 0, lastVoiceMs: 0 };
       const buf = new Float32Array(analyser.fftSize);
       const sample = () => {
-        if (!toneAnalyserRef.current) return;
+        // Bail if we were torn down OR the context has been closed (an already-scheduled
+        // frame can fire after close(); getFloatTimeDomainData on a closed ctx throws).
+        if (!toneAnalyserRef.current || ctx.state === 'closed') return;
         analyser.getFloatTimeDomainData(buf);
         let rms = 0;
         for (let i = 0; i < buf.length; i++) rms += buf[i] * buf[i];
         rms = Math.sqrt(rms / buf.length);
         if (rms > 0.01) {
-          toneSamplesRef.current.energies.push(rms);
+          const s = toneSamplesRef.current;
+          s.energies.push(rms);
+          if (!s.firstVoiceMs) s.firstVoiceMs = Date.now();
+          s.lastVoiceMs = Date.now();
           const hz = autoCorrelate(buf, ctx.sampleRate);
-          if (hz > 0) toneSamplesRef.current.pitches.push(hz);
+          if (hz > 0) s.pitches.push(hz);
         }
         if (toneAnalyserRef.current) requestAnimationFrame(sample);
       };
@@ -525,20 +539,27 @@ function Trainer({ user }) {
     toneStartingRef.current = false;
     toneAnalyserRef.current = null;
     if (toneAudioCtxRef.current) { try { toneAudioCtxRef.current.close(); } catch (e) {} toneAudioCtxRef.current = null; }
-    const { pitches, energies, startMs } = toneSamplesRef.current;
+    // Stop the mic tracks too — closing the AudioContext alone leaves the stream live,
+    // so the browser's "recording" indicator stays lit for the whole session.
+    if (toneStreamRef.current) { try { toneStreamRef.current.getTracks().forEach((t) => t.stop()); } catch (e) {} toneStreamRef.current = null; }
+    const { pitches, energies, firstVoiceMs, lastVoiceMs } = toneSamplesRef.current;
     if (!pitches.length && !energies.length) return;
-    const avgHz = pitches.length ? pitches.reduce((a, b) => a + b, 0) / pitches.length : 0;
+    // median resists autoCorrelate octave-error spikes better than a mean.
+    const avgHz = pitches.length ? median(pitches) : 0;
     const avgEnergy = energies.length ? energies.reduce((a, b) => a + b, 0) / energies.length : 0;
-    const durationSec = Math.max((Date.now() - startMs) / 1000, 0.5);
-    const wpm = wordCount ? Math.round((wordCount / durationSec) * 60) : null;
+    // Rate over ACTUAL speaking time (first→last voiced frame), not the whole mic-open
+    // window — otherwise long silences deflate wpm and the pace labels never fire.
+    const speakingSec = (firstVoiceMs && lastVoiceMs > firstVoiceMs) ? (lastVoiceMs - firstVoiceMs) / 1000 : 0;
+    const wpm = (wordCount > 0 && speakingSec >= 0.5) ? Math.round((wordCount / speakingSec) * 60) : null;
+    const havePitch = pitches.length > 0; // 0 pitches ≠ a genuinely deep voice
     // Classify tone from pitch + energy + pace
     let label = 'neutral';
-    if (avgEnergy > 0.12 && avgHz > 180) label = 'energetic';
+    if (avgEnergy > 0.12 && havePitch && avgHz > 180) label = 'energetic';
     else if (avgEnergy > 0.10 && wpm && wpm > 160) label = 'confident';
-    else if (avgHz > 200 && avgEnergy < 0.07) label = 'nervous';
+    else if (havePitch && avgHz > 200 && avgEnergy < 0.07) label = 'nervous';
     else if (wpm && wpm > 180) label = 'rushed';
     else if (avgEnergy < 0.05) label = 'hesitant';
-    else if (avgHz < 130 && avgEnergy < 0.08) label = 'flat';
+    else if (havePitch && avgHz < 130 && avgEnergy < 0.08) label = 'flat';
     userToneRef.current = { label, hz: Math.round(avgHz), energy: Math.round(avgEnergy * 1000) / 1000, wpm };
   }, []);
 
@@ -759,15 +780,18 @@ function Trainer({ user }) {
   // speaking over a newer turn (e.g. after a barge-in).
   handleTurnRef.current = async (text) => {
     if (!callActiveRef.current) return;
-    // De-dupe: if the exact same text just fired within 2.5s, it's a stray restart
-    // re-sending the same words — drop it so the prospect doesn't hear it twice.
     const t = (text || '').trim();
-    if (t && t === lastTurnRef.current.text && (Date.now() - lastTurnRef.current.at) < 2500) {
+    const wordCount = t ? t.split(/\s+/).filter(Boolean).length : 0;
+    // De-dupe stray recognizer restarts that re-send a whole buffered sentence. Only
+    // guard MULTI-word turns (≥3 words) — a short "yes"/"okay" said twice in a row is a
+    // legitimate reply, not a stray restart, and must not be swallowed.
+    if (t && wordCount >= 3 && t === lastTurnRef.current.text && (Date.now() - lastTurnRef.current.at) < 2500) {
+      stopToneAnalysis(0); // close the mic stream the dropped turn left open
       if (startListeningRef.current) startListeningRef.current();
       return;
     }
     lastTurnRef.current = { text: t, at: Date.now() };
-    stopToneAnalysis(t.split(/\s+/).length);
+    stopToneAnalysis(wordCount);
     const myTurn = (turnIdRef.current += 1);
     setCallState('thinking'); setLiveTranscript('');
     resetSpeechQueue();
@@ -780,6 +804,10 @@ function Trainer({ user }) {
         if (!started) {
           started = true;
           speakSince = Date.now();
+          // Freeze the tone for this whole reply. The new tag isn't parsed until the
+          // stream ends, so this holds the prior tone consistently across every sentence
+          // rather than flipping partway through as the tail sentences play.
+          speakingToneRef.current = aiToneRef.current;
           setCallState('speaking');
           startBargeListen(speakSince);
         }
@@ -945,8 +973,8 @@ function Trainer({ user }) {
     seedRef.current = seed || null;
     if (!seed) seedProfileRef.current = null; // fresh menu start — drop any carried prospect profile
     setIsSeeded(!!seed);
-    offTrackHelpedRef.current = false;
     whyEstablishedRef.current = false;
+    aiToneRef.current = 'neutral'; // don't carry the prior call's ending tone into the new opener
 
     sessionRef.current = {
       id, startedAt: new Date().toISOString(), mode: m, difficulty: diff,
@@ -984,15 +1012,28 @@ function Trainer({ user }) {
 
   /* ---------- WHY progress parsing ---------- */
   const stripProgressTags = useCallback((text) => {
-    const whyMatch = text.match(/\[WHY_PROGRESS:(\d+)\]/);
-    const drillMatch = text.match(/\[DRILL_PROGRESS:(\d+)\]/);
-    const toneMatch = text.match(/\[VOICE_TONE:(\w+)\]/);
+    const whyMatch = text.match(/\[WHY_PROGRESS:\s*(\d+)/);
+    const drillMatch = text.match(/\[DRILL_PROGRESS:\s*(\d+)/);
+    const toneMatch = text.match(/\[VOICE_TONE:\s*([A-Za-z]+)/);
     const whyScore = whyMatch ? parseInt(whyMatch[1], 10) : null;
     const drillScore = drillMatch ? parseInt(drillMatch[1], 10) : null;
     if (toneMatch) aiToneRef.current = toneMatch[1].toLowerCase();
-    const clean = text.replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS|VOICE_TONE):[^\]]+\]\s*/g, '').trim();
+    // Strip closed tags AND any trailing unterminated tag (a truncated stream can emit
+    // "[VOICE_TONE:warm" with no "]"), so no stray tag leaks into the spoken/shown text.
+    const clean = text
+      .replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS|VOICE_TONE):[^\]]*\]\s*/g, '')
+      .replace(/\s*\[(WHY_PROGRESS|DRILL_PROGRESS|VOICE_TONE):[^\]]*$/g, '')
+      .trim();
     return { clean, whyScore, drillScore };
   }, []);
+
+  // Prompt fragment injecting the user's detected voice tone (shared by both send paths).
+  const buildToneCtx = () => {
+    const tone = userToneRef.current?.label;
+    if (!tone || tone === 'neutral') return '';
+    const wpm = userToneRef.current.wpm ? ` — ~${userToneRef.current.wpm} wpm` : '';
+    return `\n\n[USER VOICE TONE THIS TURN: ${tone}${wpm} — adjust your response energy and pace to meet them where they are]`;
+  };
 
   // Raja phase nudge: once the why is established, inject a one-line directive (this reply
   // only) that pushes the call forward — quantify, then confirm/reframe/close — so Raja
@@ -1044,11 +1085,7 @@ function Trainer({ user }) {
     const newMsgs = [...curMsgs, userMsg];
     setMessages(newMsgs); setLoading(true);
 
-    const tone = userToneRef.current?.label;
-    const toneCtx = tone && tone !== 'neutral'
-      ? `\n\n[USER VOICE TONE THIS TURN: ${tone}${userToneRef.current.wpm ? ` — ~${userToneRef.current.wpm} wpm` : ''} — adjust your response energy and pace to meet them where they are]`
-      : '';
-    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + toneCtx;
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + buildToneCtx();
     const result = await callAPI(
       trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content })),
       sys
@@ -1087,11 +1124,7 @@ function Trainer({ user }) {
     // brevity rule suppresses it and the fast Groq stream mangles it, so drill skips
     // both — see the isDrill branch below.
     const isDrill = modeRef.current === 'drill';
-    const tone = userToneRef.current?.label;
-    const toneCtx = tone && tone !== 'neutral'
-      ? `\n\n[USER VOICE TONE THIS TURN: ${tone}${userToneRef.current.wpm ? ` — ~${userToneRef.current.wpm} wpm` : ''} — adjust your response energy and pace to meet them where they are]`
-      : '';
-    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + (isDrill ? '' : CALL_BREVITY) + toneCtx;
+    const sys = buildSystem(modeRef.current, difficultyRef.current, profileIdxRef.current) + rajaStageNudge(newMsgs) + (isDrill ? '' : CALL_BREVITY) + buildToneCtx();
     const apiMsgs = trimForApi(newMsgs).map((m) => ({ role: m.role, content: m.content }));
 
     // Pull complete sentences out of the growing raw text and speak them. Progress
@@ -2294,7 +2327,6 @@ const S = {
   historyLink: { marginTop: 32, background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
   howToLink: { marginTop: 12, background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 12, padding: '10px 20px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit', letterSpacing: '1px' },
   howToBody: { overflowY: 'auto', flex: 1, paddingRight: 4 },
-  howToCallout: { fontSize: 13, lineHeight: 1.6, color: '#E8D9B0', background: '#2A2418', border: '1px solid #D4A843', borderRadius: 8, padding: '10px 12px', marginBottom: 16 },
   howToH: { fontSize: 13, fontWeight: 800, letterSpacing: '1px', color: '#D4A843', marginTop: 16, marginBottom: 6 },
   howToP: { fontSize: 13, lineHeight: 1.6, color: '#C8C8C8', margin: '0 0 8px 0' },
   howToUl: { fontSize: 13, lineHeight: 1.7, color: '#C8C8C8', margin: '0 0 8px 0', paddingLeft: 18 },
@@ -2388,9 +2420,6 @@ const S = {
   debriefActions: { display: 'flex', flexDirection: 'column', gap: 8, marginTop: 14, borderTop: '1px solid #2A3A4A', paddingTop: 14 },
   debriefActionBtn: { background: '#1A2332', border: '1px solid #3A5A7A', color: '#9CC4E8', fontSize: 13, fontWeight: 700, padding: '11px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
   debriefActionGhost: { background: 'none', border: '1px solid #2A3A4A', color: '#8899A6', fontSize: 13, fontWeight: 600, padding: '10px 14px', borderRadius: 8, cursor: 'pointer', fontFamily: 'inherit' },
-  offTrackBox: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8, marginTop: 4, padding: '6px 10px', background: '#2A1414', border: '1px solid #5A2A2A', borderRadius: 8 },
-  offTrackLabel: { fontSize: 11, color: '#E0A8A8', fontWeight: 600, lineHeight: 1.3 },
-  offTrackBtn: { flexShrink: 0, background: '#D4A843', border: 'none', color: '#0F1419', fontSize: 11, fontWeight: 700, padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontFamily: 'inherit' },
   apiErrorBar: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, margin: '0 16px', padding: '8px 12px', background: '#2A1414', border: '1px solid #5A2A2A', borderRadius: 8, color: '#E0A8A8', fontSize: 12, fontWeight: 600 },
   apiErrorClose: { background: 'none', border: 'none', color: '#8899A6', cursor: 'pointer', fontSize: 13, flexShrink: 0 },
   hintWrap: { position: 'relative', zIndex: 20 },

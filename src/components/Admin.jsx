@@ -105,7 +105,20 @@ export default function Admin({ onBack }) {
   // even those with 0 sessions in Supabase (e.g. sessions still in localStorage).
   const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
 
-  const repList = users.map((u) => {
+  // Merge the account list with anyone who has sessions but isn't in `users`. This
+  // keeps sessions visible even if listUsers() failed server-side (it returns []),
+  // and covers session rows whose owner isn't in the account page. Sessions carry
+  // user_email / user_name from the get_all_sessions RPC.
+  const accounts = users.slice();
+  const knownIds = new Set(users.map((u) => u.id));
+  sessions.forEach((s) => {
+    if (s.user_id && !knownIds.has(s.user_id)) {
+      knownIds.add(s.user_id);
+      accounts.push({ id: s.user_id, email: s.user_email || '', name: s.user_name || '' });
+    }
+  });
+
+  const repList = accounts.map((u) => {
     const repSessions = sessions.filter((s) => s.user_id === u.id);
     const allRounds = [];
     let roleplays = 0;
@@ -130,8 +143,8 @@ export default function Admin({ onBack }) {
 
     return {
       id: u.id,
-      email: u.email,
-      name: u.name || u.email.split('@')[0],
+      email: u.email || '',
+      name: u.name || (u.email ? u.email.split('@')[0] : 'rep'),
       sessions: repSessions,
       totalSessions: repSessions.length,
       roleplays,
