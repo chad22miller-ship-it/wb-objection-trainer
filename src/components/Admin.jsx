@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import { DIFFICULTY_META } from '../constants';
 import { supabase } from '../lib/supabase';
+import { mean as avg } from '../lib/speech';
 
 const diffMeta = (n) => DIFFICULTY_META[n - 1] || DIFFICULTY_META[2];
 
@@ -103,23 +104,27 @@ export default function Admin({ onBack }) {
 
   // Build rep list from ALL registered users so every signed-up rep appears,
   // even those with 0 sessions in Supabase (e.g. sessions still in localStorage).
-  const avg = (arr) => arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null;
+  // (avg is the shared `mean` helper.)
 
-  // Merge the account list with anyone who has sessions but isn't in `users`. This
-  // keeps sessions visible even if listUsers() failed server-side (it returns []),
-  // and covers session rows whose owner isn't in the account page. Sessions carry
-  // user_email / user_name from the get_all_sessions RPC.
+  // One pass over sessions: group them by owner AND collect any session-only owners not
+  // in `users`. Grouping into a Map avoids an O(users*sessions) filter per rep below, and
+  // the account merge keeps sessions visible even if listUsers() failed server-side.
+  // Sessions carry user_email / user_name from the get_all_sessions RPC.
   const accounts = users.slice();
   const knownIds = new Set(users.map((u) => u.id));
+  const sessionsByUser = new Map();
   sessions.forEach((s) => {
-    if (s.user_id && !knownIds.has(s.user_id)) {
+    if (!s.user_id) return;
+    if (!sessionsByUser.has(s.user_id)) sessionsByUser.set(s.user_id, []);
+    sessionsByUser.get(s.user_id).push(s);
+    if (!knownIds.has(s.user_id)) {
       knownIds.add(s.user_id);
       accounts.push({ id: s.user_id, email: s.user_email || '', name: s.user_name || '' });
     }
   });
 
   const repList = accounts.map((u) => {
-    const repSessions = sessions.filter((s) => s.user_id === u.id);
+    const repSessions = sessionsByUser.get(u.id) || [];
     const allRounds = [];
     let roleplays = 0;
     let drills = 0;
@@ -174,9 +179,8 @@ export default function Admin({ onBack }) {
   const signins = [...users].sort((a, b) => (b.lastSignIn || '').localeCompare(a.lastSignIn || ''));
 
   const practicedReps = repList.filter((r) => r.totalSessions > 0);
-  const teamAvg = practicedReps.filter((r) => r.drillAvg).length
-    ? practicedReps.reduce((sum, r) => sum + (r.drillAvg || 0), 0) / practicedReps.filter((r) => r.drillAvg).length
-    : 0;
+  const drillAvgs = practicedReps.map((r) => r.drillAvg).filter(Boolean);
+  const teamAvg = drillAvgs.length ? drillAvgs.reduce((sum, v) => sum + v, 0) / drillAvgs.length : 0;
   const totalSessions = sessions.length;
   const activeLast7 = repList.filter((r) => {
     if (!r.lastActive) return false;

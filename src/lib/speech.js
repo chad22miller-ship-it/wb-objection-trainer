@@ -27,6 +27,9 @@ export const median = (arr) => {
   return s.length % 2 ? s[m] : (s[m - 1] + s[m]) / 2;
 };
 
+// Arithmetic mean; null for an empty array (callers decide the empty fallback).
+export const mean = (arr) => (arr.length ? arr.reduce((a, b) => a + b, 0) / arr.length : null);
+
 /* ============================== PITCH DETECTION ============================== */
 
 export const autoCorrelate = (buf, sampleRate) => {

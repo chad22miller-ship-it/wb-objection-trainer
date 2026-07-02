@@ -3,7 +3,7 @@ import { supabase } from './lib/supabase';
 import { store, migrateLocalSessionsToSupabase } from './lib/store';
 import { callAPI, callAPIStream } from './lib/api';
 import {
-  cleanForSpeech, chunkText, clamp, median, autoCorrelate,
+  cleanForSpeech, chunkText, clamp, median, mean, autoCorrelate,
   parseScores, parseDebriefScores,
   CALIB_PHRASE, CALIB_WORDS, REF_HZ, BASELINE_WPM,
 } from './lib/speech';
@@ -447,12 +447,14 @@ function Trainer({ user }) {
     return u;
   }, [pickVoice]);
 
+  // Freeze the current AI tone for the reply about to be spoken, so every sentence of it
+  // uses one tone even if aiToneRef flips to the next reply's tone while the tail is queued.
+  const freezeTone = useCallback(() => { speakingToneRef.current = aiToneRef.current; }, []);
+
   const speak = useCallback((text, onDone) => {
     if (!voiceEnabled || !synthRef.current) { if (onDone) onDone(); return; }
     synthRef.current.cancel();
-    // Text mode: tone tag was already parsed (finalizeReply) before speak(), so aiToneRef
-    // is this reply's tone — freeze it for the whole utterance.
-    speakingToneRef.current = aiToneRef.current;
+    freezeTone(); // text mode: tag already parsed by finalizeReply, so aiToneRef is this reply's tone
     const chunks = chunkText(cleanForSpeech(text));
     setIsSpeaking(true);
     let i = 0;
@@ -566,7 +568,7 @@ function Trainer({ user }) {
     if (!pitches.length && !energies.length) return;
     // median resists autoCorrelate octave-error spikes better than a mean.
     const avgHz = pitches.length ? median(pitches) : 0;
-    const avgEnergy = energies.length ? energies.reduce((a, b) => a + b, 0) / energies.length : 0;
+    const avgEnergy = mean(energies) || 0;
     // Rate over ACTUAL speaking time (first→last voiced frame), not the whole mic-open
     // window — otherwise long silences deflate wpm and the pace labels never fire.
     const speakingSec = (firstVoiceMs && lastVoiceMs > firstVoiceMs) ? (lastVoiceMs - firstVoiceMs) / 1000 : 0;
@@ -843,10 +845,9 @@ function Trainer({ user }) {
           started = true;
           speakSince = Date.now();
           lastAiSaidRef.current = ''; // fresh reply — echo guard should match THIS reply only
-          // Freeze the tone for this whole reply. The new tag isn't parsed until the
-          // stream ends, so this holds the prior tone consistently across every sentence
-          // rather than flipping partway through as the tail sentences play.
-          speakingToneRef.current = aiToneRef.current;
+          // Streaming: the tag arrives only at stream end, so this freezes the prior tone
+          // consistently across every sentence instead of flipping partway through.
+          freezeTone();
           setCallState('speaking');
           // No barge-in on mobile: phone speakers have poor echo cancellation, so a
           // recognizer running during playback just hears the AI itself and "interrupts"

@@ -11,13 +11,11 @@ async function getUserId() {
   const { data } = await supabase.auth.getSession();
   const session = data?.session;
   if (!session) return null;
-  // CRITICAL: the cached token expires (~1h). If we write with an expired token the
-  // DB rejects it ("JWT expired") and the save silently falls back to localStorage —
-  // which is why sessions stopped showing up server-side. If the token is expired or
-  // within 2 min of it, force a refresh before using it for a write.
-  // Refresh when the token is expired, within 2 min of expiring, OR when the session
-  // is missing an expiry entirely (a session with no expires_at can't be trusted, so
-  // force a refresh rather than writing with a possibly-stale token).
+  // The cached token expires (~1h); writing with a stale one is rejected ("JWT expired")
+  // and the save silently falls back to localStorage (why sessions stopped showing up
+  // server-side). Force a refresh when it's expired, within 2 min of expiring, or missing
+  // an expiry entirely. This backs up createClient's autoRefreshToken, whose timer can lag
+  // during a long idle call — we need a fresh token at the exact write moment.
   const expMs = (session.expires_at || 0) * 1000;
   if (!expMs || expMs - Date.now() < 120000) {
     try {
