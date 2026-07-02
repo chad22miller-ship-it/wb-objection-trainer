@@ -77,9 +77,17 @@ export default function Admin({ onBack }) {
     };
     console.error = (...a) => { push('error', a); origError(...a); };
     console.warn = (...a) => { push('warn', a); origWarn(...a); };
+    const prevOnError = window.onerror;
+    const prevOnRejection = window.onunhandledrejection;
     window.onerror = (msg, src, line, col, err) => push('error', [`${msg} (${src}:${line}:${col})`]);
     window.onunhandledrejection = (e) => push('error', ['Unhandled promise:', e.reason?.message || e.reason]);
-    return () => { console.error = origError; console.warn = origWarn; };
+    return () => {
+      console.error = origError; console.warn = origWarn;
+      // Restore the previous handlers — leaving ours installed after unmount would call
+      // setState on a dead component and clobber any handler the rest of the app sets.
+      window.onerror = prevOnError || null;
+      window.onunhandledrejection = prevOnRejection || null;
+    };
   }, []);
 
   // Poll /api/stats every 15s when debug tab is active

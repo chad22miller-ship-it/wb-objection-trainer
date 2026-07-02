@@ -351,8 +351,17 @@ function Trainer({ user }) {
       if (saved && saved.done) { setCalib(saved); calibRef.current = { pitch: saved.pitch, rate: saved.rate }; }
     })();
     return () => {
+      // Tear down EVERYTHING that can outlive the component — including a live call
+      // (sign-out mid-call unmounts Trainer; without this the recognizer + silence timer
+      // keep firing turns and TTS keeps talking over the auth screen).
+      callActiveRef.current = false;
+      turnIdRef.current += 1;
       if (synthRef.current) synthRef.current.cancel();
       if (recognitionRef.current) recognitionRef.current.abort();
+      if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
+      if (bargeRecRef.current) { try { bargeRecRef.current.abort(); } catch (e) {} bargeRecRef.current = null; }
+      if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
+      if (elapsedRef.current) clearInterval(elapsedRef.current);
       if (samplerRef.current) clearInterval(samplerRef.current);
       if (timerRef.current) clearInterval(timerRef.current);
       if (micStreamRef.current) micStreamRef.current.getTracks().forEach((t) => t.stop());
@@ -756,17 +765,21 @@ function Trainer({ user }) {
       scheduleSend(pauseGraceRef.current || 1000);
     };
     r.onerror = (ev) => {
+      // Fatal errors end the call — release the tone-analysis mic too, or its stream
+      // (and the browser's recording indicator) outlives the dead call.
+      const fatal = (msg) => {
+        callActiveRef.current = false;
+        stopToneAnalysis(0);
+        setCallState('error'); setCallError(msg);
+      };
       if (ev.error === 'not-allowed' || ev.error === 'service-not-allowed') {
-        callActiveRef.current = false; setCallState('error');
-        setCallError('Microphone is blocked. Allow mic access in your browser and try again.');
+        fatal('Microphone is blocked. Allow mic access in your browser and try again.');
       } else if (ev.error === 'network') {
-        callActiveRef.current = false; setCallState('error');
-        setCallError('Speech recognition lost network. Check your connection and try again.');
+        fatal('Speech recognition lost network. Check your connection and try again.');
       } else if (ev.error === 'no-speech') {
         // no-speech is not fatal — just restart
       } else if (ev.error === 'audio-capture') {
-        callActiveRef.current = false; setCallState('error');
-        setCallError('Lost the microphone. Another app may be using it. Close it and try again.');
+        fatal('Lost the microphone. Another app may be using it. Close it and try again.');
       }
     };
     r.onend = () => {
@@ -904,10 +917,11 @@ function Trainer({ user }) {
     if (silenceTimerRef.current) { clearTimeout(silenceTimerRef.current); silenceTimerRef.current = null; }
     if (callRecRef.current) { try { callRecRef.current.abort(); } catch (e) {} callRecRef.current = null; }
     stopBargeListen();
+    stopToneAnalysis(0); // release the tone-analysis mic stream (else the recording indicator stays lit)
     resetSpeechQueue();
     stopSpeaking();
     setCallMode(false); setCallState('idle'); setLiveTranscript(''); setCallError('');
-  }, [stopSpeaking, stopBargeListen, resetSpeechQueue]);
+  }, [stopSpeaking, stopBargeListen, resetSpeechQueue, stopToneAnalysis]);
 
   // Manual interrupt (tap the speaking indicator): stop talking and listen now.
   const bargeIn = useCallback(() => {
@@ -915,6 +929,9 @@ function Trainer({ user }) {
     turnIdRef.current += 1; // invalidate the in-flight stream so it can't resume speaking
     stopBargeListen();
     resetSpeechQueue();
+    // Same as auto barge-in: the interrupted words are no longer "being said", so the
+    // echo guard must not match the user's next turn against them (they may quote the AI).
+    lastAiSaidRef.current = '';
     stopSpeaking();
     setCallState('listening');
     if (startListeningRef.current) startListeningRef.current();
@@ -1871,7 +1888,7 @@ function Trainer({ user }) {
   return (
     <div style={S.container}>
       <div style={S.header}>
-        <button style={S.backBtn} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
+        <button style={S.backBtn} onClick={() => { endCall(); stopSpeaking(); stopTimer(); setView('home'); }}>← Home</button>
         <div style={S.headerCenter}>
           <span style={S.headerTitle}>{mode === 'roleplay' ? 'THE PROSPECT' : mode === 'raja' ? 'LEARN FROM RAJA' : 'THE GAUNTLET'}</span>
           <span style={{ ...S.diffPillSm, color: d.color, borderColor: d.color }}>{d.name}</span>
@@ -2065,7 +2082,7 @@ function Trainer({ user }) {
                     </button>
                   )}
                   <button style={S.debriefActionBtn} onClick={() => startSession(mode, difficulty, isSeeded ? seedRef.current : null)}>↻ Run it again</button>
-                  <button style={S.debriefActionGhost} onClick={() => { stopSpeaking(); stopTimer(); setView('home'); }}>🏠 New session</button>
+                  <button style={S.debriefActionGhost} onClick={() => { endCall(); stopSpeaking(); stopTimer(); setView('home'); }}>🏠 New session</button>
                 </div>
               </>
             )
