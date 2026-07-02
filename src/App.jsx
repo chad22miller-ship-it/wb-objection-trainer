@@ -25,6 +25,24 @@ const SPEECH_REC_SUPPORTED = typeof window !== 'undefined' && !!(window.SpeechRe
 // headphones — on laptop speakers the mic can hear the AI and self-interrupt;
 // flip to false to disable.
 const AUTO_BARGE = true;
+
+// Normalize spoken text for echo comparison (lowercase, strip punctuation, collapse spaces).
+const normSpeech = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
+// Is `heard` likely the AI's own voice echoing back through the speaker, rather than a
+// real user turn? Echoes are long, near-verbatim chunks of what the AI just said, so we
+// only treat a capture as echo once it clears `minWords` and either is a verbatim
+// substring of the AI's speech or overlaps it above `threshold`. Short conversational
+// turns stay below minWords and are never dropped. `spokenNorm` is pre-normalized.
+const isLikelyEcho = (heard, spokenNorm, minWords, threshold) => {
+  const h = normSpeech(heard);
+  if (!h || !spokenNorm) return false;
+  const hw = h.split(' ').filter(Boolean);
+  if (hw.length < minWords) return false;
+  if (spokenNorm.includes(h)) return true;
+  const sw = new Set(spokenNorm.split(' '));
+  return hw.filter((w) => sw.has(w)).length / hw.length > threshold;
+};
+
 const CALL_BREVITY = "\n\nVOICE CALL MODE: You are on a live phone call. Talk like a real person — reply in 1 to 2 short, natural spoken sentences. No lists, no markdown, no stage directions. Get to the point fast and let them respond. If a progress tag like [WHY_PROGRESS:n] is required, put it at the very end after your spoken words.";
 
 // Web Speech voices don't expose gender, so we infer it from the voice name.
@@ -276,8 +294,7 @@ function Trainer({ user }) {
   const sqSpeakingRef = useRef(false); // is an utterance currently playing
   const sqDoneRef = useRef(false);     // has the model stream finished
   const sqDrainRef = useRef(null);     // callback to fire when queue empties AND stream done
-  const lastSpokenRef = useRef('');    // what the AI is currently saying — used to ignore mic echo
-  const lastAiSaidRef = useRef('');    // the AI's last reply, kept for echo detection (NOT cleared on reset/barge)
+  const lastAiSaidRef = useRef('');    // the AI's current/last spoken reply — used by BOTH echo guards (barge + post-speech); reset when a new reply starts speaking, not on queue reset
   const bargeRecRef = useRef(null);    // recognizer that listens while the AI speaks (barge-in)
   const callStateRef = useRef('idle'); // mirror of callState for use inside async callbacks
   const turnIdRef = useRef(0);         // bumps each turn so a stale stream can't speak over a new one
@@ -466,7 +483,8 @@ function Trainer({ user }) {
     sqDoneRef.current = false;
     sqDrainRef.current = null;
     sqSpeakingRef.current = false;
-    lastSpokenRef.current = '';
+    // NOTE: lastAiSaidRef is intentionally NOT cleared here — the post-speech echo guard
+    // needs the just-spoken reply after the queue resets. It's reset when a new reply starts.
     if (synthRef.current) synthRef.current.cancel();
   }, []);
 
@@ -474,11 +492,9 @@ function Trainer({ user }) {
     if (!voiceEnabled || !synthRef.current) return;
     const t = (text || '').trim();
     if (!t) return;
-    // Remember the AI's words so the barge-in recognizer can tell its own echo
-    // (heard back through the speakers) from the user actually interrupting.
-    lastSpokenRef.current = (lastSpokenRef.current + ' ' + t).slice(-600);
-    // Same words in a ref that ISN'T wiped by resetSpeechQueue/barge — the post-speech
-    // echo guard in handleTurn needs it after the queue has been reset.
+    // Remember the AI's words so both echo guards (barge-in during speech, and the
+    // post-speech turn guard) can tell its own echo from a real user turn. NOT cleared
+    // by resetSpeechQueue — it's reset when the next reply starts speaking.
     lastAiSaidRef.current = (lastAiSaidRef.current + ' ' + t).slice(-600);
     sqItemsRef.current.push(t);
     if (!sqSpeakingRef.current) pumpSpeech();
@@ -574,16 +590,16 @@ function Trainer({ user }) {
     stopBargeListen();
     const r = new SR();
     r.continuous = true; r.interimResults = true; r.lang = 'en-US'; r.maxAlternatives = 1;
-    const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
     r.onresult = (e) => {
       for (let i = e.resultIndex; i < e.results.length; i += 1) {
         if (!e.results[i].isFinal) continue;
         const txt = (e.results[i][0].transcript || '').trim();
         const words = txt.split(/\s+/).filter(Boolean).length;
-        // Echo guard: if what we "heard" is just the AI's own words coming back
-        // through the speakers, ignore it (this is what self-interrupts on laptops).
-        const heard = norm(txt);
-        if (heard && norm(lastSpokenRef.current).includes(heard)) continue;
+        // Echo guard: if what we "heard" is just the AI's own words coming back through
+        // the speakers, ignore it (self-interrupt on laptops). Uses the shared helper
+        // with a low bar (≥2 words, 0.5 overlap) so a fragment with a transcription slip
+        // still reads as echo rather than triggering a false interruption.
+        if (isLikelyEcho(txt, normSpeech(lastAiSaidRef.current), 2, 0.5)) continue;
         // Only treat it as a real interruption if the AI has been talking for a beat
         // and the listener heard a genuine phrase (≥2 words) — keeps speaker echo from
         // self-interrupting while still triggering on a quick "wait, stop".
@@ -594,6 +610,7 @@ function Trainer({ user }) {
           // actually stop talking (instead of jumping in after the first few words).
           stopBargeListen();
           resetSpeechQueue();
+          lastAiSaidRef.current = ''; // interrupted — its words are no longer "being said", so don't echo-match against them
           turnIdRef.current += 1; // invalidate the interrupted reply
           setCallState('listening');
           if (startListeningRef.current) startListeningRef.current(txt);
@@ -782,33 +799,33 @@ function Trainer({ user }) {
   // Streaming version: speaks each sentence the moment it's complete, then listens
   // again as soon as the spoken queue drains. myTurn guards against a slow stream
   // speaking over a newer turn (e.g. after a barge-in).
+  // Restart listening after a dropped (echo/dup) turn, keeping the mobile tail delay so
+  // the speaker's audio doesn't get recaptured into another echo loop.
+  const relistenAfterDrop = () => {
+    stopToneAnalysis(0); // close the mic stream the dropped turn opened
+    stopBargeListen();
+    const go = () => { if (callActiveRef.current && startListeningRef.current) startListeningRef.current(); };
+    if (isMobile) setTimeout(go, 500); else go();
+  };
+
   handleTurnRef.current = async (text) => {
     if (!callActiveRef.current) return;
     const t = (text || '').trim();
     const wordCount = t ? t.split(/\s+/).filter(Boolean).length : 0;
-    // Echo guard: on laptop speakers (no headphones) the mic hears the PROSPECT's own
-    // voice and captures it as a "user" turn — the prospect then answers itself. If the
-    // captured text is largely what the AI just spoke (lastSpokenRef holds its recent
-    // words), drop it and keep listening instead of sending it as the user's reply.
-    const normEcho = (s) => (s || '').toLowerCase().replace(/[^a-z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
-    const spoken = normEcho(lastAiSaidRef.current);
-    const heard = normEcho(t);
-    if (heard && spoken && wordCount >= 3) {
-      const hw = heard.split(' ').filter(Boolean);
-      const sw = new Set(spoken.split(' '));
-      const overlap = hw.length ? hw.filter((w) => sw.has(w)).length / hw.length : 0;
-      if (spoken.includes(heard) || overlap > 0.6) {
-        stopToneAnalysis(0); // close the mic stream this dropped turn opened
-        if (startListeningRef.current) startListeningRef.current();
-        return;
-      }
+    // Echo guard: on laptop/phone speakers (no headphones) the mic hears the PROSPECT's
+    // own voice and captures it as a "user" turn — the prospect then answers itself. Only
+    // LONG captures (≥6 words) that are largely what the AI just said are treated as echo;
+    // short conversational turns like "that makes sense" are never dropped, even if their
+    // words happen to appear in the AI's last reply.
+    if (isLikelyEcho(t, normSpeech(lastAiSaidRef.current), 6, 0.7)) {
+      relistenAfterDrop();
+      return;
     }
     // De-dupe stray recognizer restarts that re-send a whole buffered sentence. Only
     // guard MULTI-word turns (≥3 words) — a short "yes"/"okay" said twice in a row is a
     // legitimate reply, not a stray restart, and must not be swallowed.
     if (t && wordCount >= 3 && t === lastTurnRef.current.text && (Date.now() - lastTurnRef.current.at) < 2500) {
-      stopToneAnalysis(0); // close the mic stream the dropped turn left open
-      if (startListeningRef.current) startListeningRef.current();
+      relistenAfterDrop();
       return;
     }
     lastTurnRef.current = { text: t, at: Date.now() };
@@ -850,7 +867,13 @@ function Trainer({ user }) {
       const go = () => { if (callActiveRef.current && turnIdRef.current === myTurn && startListeningRef.current) startListeningRef.current(); };
       if (isMobile) setTimeout(go, 500); else go();
     };
-    if (reply == null) { openMic(); return; }
+    if (reply == null) {
+      // No sentence was spoken (error/empty stream). If nothing new was said, clear the
+      // stale reply so the next turn's echo guard doesn't compare against old words.
+      if (!started) lastAiSaidRef.current = '';
+      openMic();
+      return;
+    }
     finishSpeechStream(openMic);
   };
 
