@@ -4,6 +4,22 @@
 // failure: { ok: true, text } on success, { ok: false, error, status } on failure.
 // Auto-retries on 429 and transient 5xx up to 3 times with backoff.
 
+import { supabase } from './supabase';
+
+// Attach the signed-in user's access token so the server can gate the endpoints
+// (see verifyAuth in api/_shared.js). getSession() reads the cached token locally —
+// no network round-trip. In no-auth local mode (supabase == null) we send no token.
+async function authHeaders() {
+  const headers = { 'Content-Type': 'application/json' };
+  if (!supabase) return headers;
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    if (token) headers.Authorization = `Bearer ${token}`;
+  } catch (e) { /* fall through without a token — server will 403 */ }
+  return headers;
+}
+
 export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
   const maxRetries = 3;
   let lastError = 'Connection error. Try again.';
@@ -15,7 +31,7 @@ export async function callAPI(msgs, system, { timeoutMs = 90000 } = {}) {
     try {
       const res = await fetch('/api/chat', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: await authHeaders(),
         signal: controller.signal,
         body: JSON.stringify({
           system,
@@ -69,7 +85,7 @@ export async function callAPIStream(msgs, system, { onDelta, max_tokens = 320, t
   try {
     const res = await fetch('/api/chat-stream', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: await authHeaders(),
       signal: controller.signal,
       body: JSON.stringify({
         system,

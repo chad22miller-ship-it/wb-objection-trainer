@@ -78,3 +78,36 @@ export const toOpenAIMessages = (system, messages) => {
   msgs.push(...(messages || []).map((m) => ({ role: m.role, content: m.content })));
   return msgs;
 };
+
+// Gate the chat endpoints behind a real Supabase login so the public Vercel URL
+// can't be curled by anyone to drain the free-tier AI keys (denial-of-wallet) or
+// be used as a free general-purpose LLM proxy. Verifies the caller's access token
+// against Supabase's auth server with the anon key (same key the browser already
+// has — no service role needed). Returns { ok } — handlers 403 on !ok.
+//
+// If Supabase isn't configured (VITE_SUPABASE_URL / VITE_SUPABASE_ANON_KEY unset),
+// the app runs in its no-auth local mode (App.jsx supports this), so we skip the
+// gate rather than lock everyone out — mirroring admin.js's ADMIN_EMAIL handling.
+// Fails CLOSED on a bad/absent token or an unreachable auth server: protecting the
+// keys is the whole point, and a Supabase outage would break sign-in anyway.
+export const verifyAuth = async (req) => {
+  const url = process.env.VITE_SUPABASE_URL;
+  const anon = process.env.VITE_SUPABASE_ANON_KEY;
+  if (!url || !anon) return { ok: true }; // no-auth local/dev mode
+  const token = ((req.headers && req.headers.authorization) || '').replace(/^Bearer\s+/i, '').trim();
+  if (!token) return { ok: false };
+  try {
+    const ac = new AbortController();
+    const timer = setTimeout(() => ac.abort(), 5000);
+    const r = await fetch(`${url}/auth/v1/user`, {
+      headers: { Authorization: `Bearer ${token}`, apikey: anon },
+      signal: ac.signal,
+    });
+    clearTimeout(timer);
+    if (!r.ok) return { ok: false };
+    const u = await r.json().catch(() => null);
+    return u && u.id ? { ok: true } : { ok: false };
+  } catch (e) {
+    return { ok: false };
+  }
+};

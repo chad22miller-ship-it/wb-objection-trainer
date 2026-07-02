@@ -2258,10 +2258,22 @@ function Trainer({ user }) {
             {whyProgress >= 8 && whyProgress < 10 && "You've got the WHY. Bridge into the New Art of Living."}
             {whyProgress >= 10 && "Perfect. They're ready to hear the solution."}
           </div>
-          <div style={{ ...S.drillInputRow, justifyContent: 'center', marginTop: 8 }}>
-            <button style={S.callCircle} onClick={startCall} title="Resume live call">📞</button>
-            <span style={{ fontSize: 12, color: '#8899A6', alignSelf: 'center' }}>Tap to talk to the prospect</span>
-          </div>
+          {/* Voice browsers get the call orb; iPhone/no-SpeechRecognition browsers
+              keep a text composer so the prospect roleplay never dead-ends after
+              the first message (matches the drill/raja composers below). */}
+          {(!SPEECH_REC_SUPPORTED || IS_IOS) ? (
+            <div style={S.drillInputRow}>
+              <textarea ref={inputRef} value={input} onChange={(e) => setInput(e.target.value)} onKeyDown={handleKeyDown}
+                placeholder="Type your reply to the prospect…"
+                style={S.input} rows={1} disabled={loading} />
+              <button onClick={sendMessage} disabled={loading || !input.trim()} style={{ ...S.sendBtn, opacity: loading || !input.trim() ? 0.4 : 1 }}>Send</button>
+            </div>
+          ) : (
+            <div style={{ ...S.drillInputRow, justifyContent: 'center', marginTop: 8 }}>
+              <button style={S.callCircle} onClick={startCall} title="Resume live call">📞</button>
+              <span style={{ fontSize: 12, color: '#8899A6', alignSelf: 'center' }}>Tap to talk to the prospect</span>
+            </div>
+          )}
         </div>
 
       /* Drill Progress Bar — replaces input in gauntlet after first response */

@@ -5,7 +5,7 @@
 import {
   GEMINI_MODEL, GROQ_MODEL,
   parseKeys, isReady, setCooldown, coolingCount, roundRobin, leastCooledIndex,
-  validateChatBody, buildGeminiBody, toOpenAIMessages,
+  validateChatBody, buildGeminiBody, toOpenAIMessages, verifyAuth,
 } from './_shared.js';
 
 // --- Provider call functions ---
@@ -96,6 +96,11 @@ export function getUsageStats() {
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // Require a signed-in Supabase user (blocks anonymous key-draining / open-proxy abuse).
+  if (!(await verifyAuth(req)).ok) {
+    return res.status(403).json({ error: 'Please sign in again to keep training.' });
   }
 
   const geminiKeys = parseKeys('GEMINI_API_KEY');

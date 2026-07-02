@@ -10,7 +10,7 @@
 import {
   GEMINI_MODEL, GROQ_MODEL,
   parseKeys, isReady, setCooldown,
-  validateChatBody, buildGeminiBody, toOpenAIMessages,
+  validateChatBody, buildGeminiBody, toOpenAIMessages, verifyAuth,
 } from './_shared.js';
 
 // Read an upstream SSE stream and re-emit clean {text} events. `extractDelta`
@@ -92,6 +92,11 @@ async function streamGemini(apiKey, geminiBody, res) {
 export default async function handler(req, res) {
   if (req.method !== 'POST') {
     return res.status(405).json({ error: 'Method not allowed' });
+  }
+
+  // Require a signed-in Supabase user (before switching to SSE, so the error stays JSON).
+  if (!(await verifyAuth(req)).ok) {
+    return res.status(403).json({ error: 'Please sign in again to keep training.' });
   }
 
   const geminiKeys = parseKeys('GEMINI_API_KEY');
